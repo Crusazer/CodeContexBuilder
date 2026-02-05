@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QDialogButtonBox,
     QMenu,
+    QTreeWidgetItemIterator,  # Добавлено для обновления цветов при смене темы
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette, QSyntaxHighlighter, QTextCharFormat, QFont
@@ -270,6 +271,16 @@ class MainWindow(QMainWindow):
         self.settings.dark_mode = not self.settings.dark_mode
         self.settings.save()
         self.update_theme_style()
+
+        # Принудительно обновляем цвета меток (SKEL/FULL) в дереве,
+        # так как они зависят от dark_mode в update_item_label
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            path_str = item.data(0, Qt.ItemDataRole.UserRole)
+            if path_str:
+                self.update_item_label(item, path_str)
+            iterator += 1
 
     def init_ui(self):
         self.setWindowTitle("CodeContext Agent")
@@ -882,11 +893,23 @@ class MainWindow(QMainWindow):
 
         if override == "skeleton":
             item.setText(0, f"{clean_name} [SKEL]")
-            # Можно покрасить в другой цвет
-            item.setForeground(0, QColor("#e6db74"))  # Желтоватый
+            # Проверяем тему для установки цвета
+            if self.settings.dark_mode:
+                item.setForeground(
+                    0, QColor("#e6db74")
+                )  # Светло-желтый для темной темы
+            else:
+                item.setForeground(
+                    0, QColor("#b58900")
+                )  # Оливковый/Темно-желтый для светлой
         elif override == "full":
             item.setText(0, f"{clean_name} [FULL]")
-            item.setForeground(0, QColor("#a6e22e"))  # Зеленоватый
+            if self.settings.dark_mode:
+                item.setForeground(
+                    0, QColor("#a6e22e")
+                )  # Светло-зеленый для темной темы
+            else:
+                item.setForeground(0, QColor("#008000"))  # Темно-зеленый для светлой
         else:
             item.setText(0, clean_name)
             # Возвращаем стандартный цвет
