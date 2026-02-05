@@ -29,7 +29,7 @@ class CodeProcessor:
             with open(file_path, "tr", encoding="utf-8") as f:
                 f.read(1024)
                 return False
-        except:
+        except Exception:
             return True
 
     @staticmethod
