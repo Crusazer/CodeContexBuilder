@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QPlainTextEdit,
     QDialogButtonBox,
+    QMenu,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette, QSyntaxHighlighter, QTextCharFormat, QFont
@@ -146,6 +147,7 @@ class MainWindow(QMainWindow):
         self.selected_paths = set()
         self.cached_full_context = ""
         self.agent_worker = None  # Ссылка на воркера агента
+        self.file_overrides = {}
 
         self.init_ui()
         self.update_theme_style()
@@ -249,6 +251,10 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderLabel("Project Files")
         self.tree.itemChanged.connect(self.on_item_checked)
         self.tree.currentItemChanged.connect(self.on_current_item_changed)
+
+        # Настройка контекстного меню
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
         l_layout.addWidget(self.tree)
 
         splitter.addWidget(left_panel)
@@ -427,10 +433,18 @@ class MainWindow(QMainWindow):
                     parent = item
                 else:
                     parent = dirs[s_rel]
+
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+            # Убран дублирующийся блок кода создания QTreeWidgetItem
+
             f = QTreeWidgetItem(parent, [parts[-1]])
             f.setFlags(f.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             f.setCheckState(0, Qt.CheckState.Unchecked)
-            f.setData(0, Qt.ItemDataRole.UserRole, str(n.path))
+            path_str = str(n.path)
+            f.setData(0, Qt.ItemDataRole.UserRole, path_str)
+
+            # ВОССТАНАВЛИВАЕМ ВИЗУАЛЬНУЮ МЕТКУ
+            self.update_item_label(f, path_str)
 
     def on_processing_mode_changed(self):
         self.update_preview_content()
@@ -566,8 +580,9 @@ class MainWindow(QMainWindow):
             return ""
 
         out = []
-        # Проверяем режим обработки (Скелет или Full)
-        is_skel = self.combo_mode.currentText().startswith("Skeleton")
+        # Глобальная настройка
+        global_mode_text = self.combo_mode.currentText()
+        global_is_skeleton = global_mode_text.startswith("Skeleton")
 
         root = Path(self.settings.last_project_path)
         sorted_paths = sorted([Path(p) for p in self.selected_paths])
@@ -595,8 +610,21 @@ class MainWindow(QMainWindow):
             except ValueError:
                 rel = p.name
 
-            # Здесь вызывается процессор, который вернет либо полный код, либо скелет (AST)
-            content = CodeProcessor.process_file(p, is_skel)
+            # === ЛОГИКА ВЫБОРА РЕЖИМА ===
+            path_str = str(p)
+            override = self.file_overrides.get(path_str)
+
+            if override == "skeleton":
+                is_file_skeleton = True
+            elif override == "full":
+                is_file_skeleton = False
+            else:
+                # Если override нет, берем глобальную настройку
+                is_file_skeleton = global_is_skeleton
+            # ============================
+
+            # Передаем вычисленный флаг is_file_skeleton
+            content = CodeProcessor.process_file(p, is_file_skeleton)
 
             # Определяем язык для markdown разметки
             ext = p.suffix.lower()
@@ -614,7 +642,9 @@ class MainWindow(QMainWindow):
             elif ext in [".md"]:
                 lang = "markdown"
 
-            out.append(f"## File: {rel}")
+            # Добавим визуальную пометку в сам контекст, чтобы LLM понимала (опционально)
+            header_suffix = " (Skeleton)" if is_file_skeleton else ""
+            out.append(f"## File: {rel}{header_suffix}")
             out.append(f"```{lang}")
             out.append(content)
             out.append("```\n")
@@ -709,3 +739,81 @@ class MainWindow(QMainWindow):
 
         if self.agent_worker:
             self.agent_worker.set_user_response(approved)
+
+    def show_tree_context_menu(self, position):
+        item = self.tree.itemAt(position)
+        if not item:
+            return
+
+        path_str = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path_str:
+            return  # Это папка без пути или корень, пропускаем
+
+        # Создаем меню
+        menu = QMenu()
+
+        # Действия
+        action_default = menu.addAction("Use Global Default")
+        action_full = menu.addAction("Force FULL Content")
+        action_skel = menu.addAction("Force SKELETON")
+
+        # Отмечаем текущее состояние галочкой в меню (опционально, для красоты)
+        current_override = self.file_overrides.get(path_str)
+        if current_override == "full":
+            action_full.setCheckable(True)
+            action_full.setChecked(True)
+        elif current_override == "skeleton":
+            action_skel.setCheckable(True)
+            action_skel.setChecked(True)
+        else:
+            action_default.setCheckable(True)
+            action_default.setChecked(True)
+
+        # Запуск меню и обработка выбора
+        action = menu.exec(self.tree.viewport().mapToGlobal(position))
+
+        if action == action_default:
+            self.set_file_override(item, None)
+        elif action == action_full:
+            self.set_file_override(item, "full")
+        elif action == action_skel:
+            self.set_file_override(item, "skeleton")
+
+    def set_file_override(self, item: QTreeWidgetItem, mode: str):
+        path_str = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path_str:
+            return
+
+        if mode is None:
+            # Удаляем из словаря
+            self.file_overrides.pop(path_str, None)
+        else:
+            self.file_overrides[path_str] = mode
+
+        # Обновляем визуальное отображение (текст в дереве)
+        self.update_item_label(item, path_str)
+
+        # Обновляем превью, так как контекст изменился
+        self.update_preview_content()
+
+    def update_item_label(self, item: QTreeWidgetItem, path_str: str):
+        """Обновляет текст элемента дерева, добавляя маркер режима."""
+        # Получаем чистое имя файла (восстанавливаем из пути, чтобы убрать старые метки)
+        clean_name = Path(path_str).name
+
+        override = self.file_overrides.get(path_str)
+
+        if override == "skeleton":
+            item.setText(0, f"{clean_name} [SKEL]")
+            # Можно покрасить в другой цвет
+            item.setForeground(0, QColor("#e6db74"))  # Желтоватый
+        elif override == "full":
+            item.setText(0, f"{clean_name} [FULL]")
+            item.setForeground(0, QColor("#a6e22e"))  # Зеленоватый
+        else:
+            item.setText(0, clean_name)
+            # Возвращаем стандартный цвет
+            if self.settings.dark_mode:
+                item.setForeground(0, QColor("#f0f0f0"))
+            else:
+                item.setForeground(0, QColor("#000000"))
