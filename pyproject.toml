@@ -1,0 +1,12 @@
+[project]
+name = "codecontextbuilder"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "openai>=2.16.0",
+    "pathspec>=1.0.4",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.12.0",
+    "pyqt6>=6.10.2",
+]
