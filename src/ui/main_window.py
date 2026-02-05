@@ -40,6 +40,54 @@ from src.core.processor_logic import CodeProcessor
 from src.core.token_counter import TokenCounter
 
 
+class FileEditDialog(QDialog):
+    """Диалог для подтверждения изменения файла."""
+
+    def __init__(self, path: str, original: str, new_code: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Allow Edit? - {path}")
+        self.resize(800, 600)
+
+        layout = QVBoxLayout(self)
+
+        info_label = QLabel(f"Agent wants to EDIT: <b>{path}</b>")
+        layout.addWidget(info_label)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Original
+        orig_widget = QWidget()
+        orig_layout = QVBoxLayout(orig_widget)
+        orig_layout.addWidget(QLabel("Original Snippet:"))
+        self.orig_edit = QTextEdit()
+        self.orig_edit.setPlainText(original)
+        self.orig_edit.setReadOnly(True)
+        # Apply highlighter if you have one instantiated globally or pass it
+        # self.orig_edit.setStyleSheet("background-color: #ffe6e6;") # Reddish tint
+        orig_layout.addWidget(self.orig_edit)
+
+        # New
+        new_widget = QWidget()
+        new_layout = QVBoxLayout(new_widget)
+        new_layout.addWidget(QLabel("New Snippet:"))
+        self.new_edit = QTextEdit()
+        self.new_edit.setPlainText(new_code)
+        self.new_edit.setReadOnly(True)
+        # self.new_edit.setStyleSheet("background-color: #e6ffe6;") # Greenish tint
+        new_layout.addWidget(self.new_edit)
+
+        splitter.addWidget(orig_widget)
+        splitter.addWidget(new_widget)
+        layout.addWidget(splitter)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 # --- SYNTAX HIGHLIGHTER (As before) ---
 class PythonHighlighter(QSyntaxHighlighter):
     def __init__(self, document, is_dark=True):
@@ -698,6 +746,7 @@ class MainWindow(QMainWindow):
         self.agent_log_output.append(">>> Starting Agent...")
         self.btn_run_agent.setEnabled(False)
 
+        # Инициализация воркера с текущими настройками
         self.agent_worker = AgentWorker(
             settings=self.settings,
             project_root=Path(self.settings.last_project_path),
@@ -706,15 +755,43 @@ class MainWindow(QMainWindow):
             use_reasoning=self.cb_reasoning.isChecked(),
         )
 
+        # Подключение стандартных сигналов (логи, результат, ошибки, завершение)
         self.agent_worker.log_signal.connect(self.on_agent_log)
         self.agent_worker.result_signal.connect(self.on_agent_result)
         self.agent_worker.error_signal.connect(self.on_agent_error)
-        self.agent_worker.request_approval_signal.connect(
-            self.on_agent_approval_request
-        )
         self.agent_worker.finished.connect(lambda: self.btn_run_agent.setEnabled(True))
 
+        # --- НОВОЕ: Подключение сигналов Human-in-the-Loop ---
+
+        # 1. Запрос на создание файла (path, content)
+        self.agent_worker.request_creation_signal.connect(
+            self.on_agent_creation_request
+        )
+
+        # 2. Запрос на изменение файла (path, original_snippet, new_snippet)
+        self.agent_worker.request_edit_signal.connect(self.on_agent_edit_request)
+
         self.agent_worker.start()
+
+    def on_agent_creation_request(self, rel_path, content):
+        """Обработка запроса на СОЗДАНИЕ файла."""
+        dialog = FileCreationDialog(rel_path, content, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.agent_worker.set_user_response(True)
+        else:
+            self.agent_worker.set_user_response(False)
+
+    def on_agent_edit_request(self, rel_path, original, new_code):
+        """Обработка запроса на РЕДАКТИРОВАНИЕ файла."""
+        dialog = FileEditDialog(rel_path, original, new_code, self)
+        # Можно добавить подсветку синтаксиса в диалог, если нужно
+        # highlighter1 = PythonHighlighter(dialog.orig_edit.document(), self.is_dark_theme)
+        # highlighter2 = PythonHighlighter(dialog.new_edit.document(), self.is_dark_theme)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.agent_worker.set_user_response(True)
+        else:
+            self.agent_worker.set_user_response(False)
 
     def on_agent_log(self, msg):
         self.agent_log_output.append(msg)

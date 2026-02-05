@@ -3,7 +3,7 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal, QWaitCondition, QMutex
 
 from src.config import AppSettings
-from src.core.ai_service import AIService, AgentService  # Обновлен импорт
+from src.core.ai_service import AIService, AgentService
 from src.core.fs_scanner import ProjectScanner
 
 
@@ -42,15 +42,17 @@ class AIWorker(QThread):
 class AgentWorker(QThread):
     """
     Воркер для запуска агента.
-    Поддерживает Human-in-the-loop через сигналы и блокировку потока.
     """
 
-    log_signal = pyqtSignal(str)  # Логи процесса
-    result_signal = pyqtSignal(str)  # Финальный результат
-    error_signal = pyqtSignal(str)  # Ошибка
+    log_signal = pyqtSignal(str)
+    result_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
 
-    # Сигнал запроса подтверждения: (path, content)
-    request_approval_signal = pyqtSignal(str, str)
+    # Сигнал запроса подтверждения СОЗДАНИЯ: (path, content)
+    request_creation_signal = pyqtSignal(str, str)
+
+    # Сигнал запроса подтверждения РЕДАКТИРОВАНИЯ: (path, original, new)
+    request_edit_signal = pyqtSignal(str, str, str)
 
     def __init__(
         self,
@@ -67,42 +69,30 @@ class AgentWorker(QThread):
         self.user_prompt = user_prompt
         self.use_reasoning = use_reasoning
 
-        # Механизмы синхронизации
         self.mutex = QMutex()
         self.condition = QWaitCondition()
         self.user_approved_last_action = False
 
     def set_user_response(self, approved: bool):
-        """Вызывается из UI потока, чтобы передать ответ пользователя."""
+        """Передача ответа от UI."""
         self.mutex.lock()
         self.user_approved_last_action = approved
         self.condition.wakeAll()
         self.mutex.unlock()
 
     def _file_creation_callback(self, rel_path: str, content: str) -> bool:
-        """
-        Этот метод вызывается внутри run_agent_loop (в этом потоке).
-        Он должен:
-        1. Отправить сигнал в UI.
-        2. Заблокировать выполнение, пока UI не ответит.
-        3. Если Approve -> Создать файл.
-        4. Вернуть True/False.
-        """
+        """Обработка создания файла."""
+        self.request_creation_signal.emit(rel_path, content)
 
-        # 1. Отправляем запрос
-        self.request_approval_signal.emit(rel_path, content)
-
-        # 2. Ждем ответа
+        # Ждем ответа
         self.mutex.lock()
         self.condition.wait(self.mutex)
         approved = self.user_approved_last_action
         self.mutex.unlock()
 
-        # 3. Действуем
         if approved:
             try:
                 full_path = self.project_root / rel_path
-                # Создаем директории если нет
                 full_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(full_path, "w", encoding="utf-8") as f:
                     f.write(content)
@@ -115,6 +105,51 @@ class AgentWorker(QThread):
             self.log_signal.emit(f"[System] File creation denied by user: {rel_path}")
             return False
 
+    def _file_editor_callback(self, rel_path: str, original: str, new_code: str) -> str:
+        """Обработка редактирования файла."""
+        full_path = self.project_root / rel_path
+
+        # 1. Проверяем, существует ли файл
+        if not full_path.exists():
+            return f"Error: File {rel_path} does not exist. Use create_file instead."
+
+        # 2. Читаем файл
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+        except Exception as e:
+            return f"Error reading file: {e}"
+
+        # 3. Проверяем вхождение original_snippet
+        count = file_content.count(original)
+        if count == 0:
+            return "Error: `original_snippet` not found in the file. Check whitespace and indentation exactly."
+        if count > 1:
+            return "Error: `original_snippet` occurs multiple times. Provide more context to make it unique."
+
+        # 4. Спрашиваем пользователя
+        self.request_edit_signal.emit(rel_path, original, new_code)
+
+        self.mutex.lock()
+        self.condition.wait(self.mutex)
+        approved = self.user_approved_last_action
+        self.mutex.unlock()
+
+        # 5. Применяем изменения
+        if approved:
+            try:
+                new_file_content = file_content.replace(original, new_code)
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(new_file_content)
+                self.log_signal.emit(f"[System] File edited: {rel_path}")
+                return "Success: File edited."
+            except Exception as e:
+                self.log_signal.emit(f"[System] Error writing file: {e}")
+                return f"Error writing file: {e}"
+        else:
+            self.log_signal.emit(f"[System] Edit denied by user: {rel_path}")
+            return "User denied the edit."
+
     def run(self):
         try:
             agent = AgentService(self.settings)
@@ -123,6 +158,7 @@ class AgentWorker(QThread):
                 user_prompt=self.user_prompt,
                 use_reasoning=self.use_reasoning,
                 file_creator_callback=self._file_creation_callback,
+                file_editor_callback=self._file_editor_callback,  # Передаем новый коллбек
                 log_callback=lambda msg: self.log_signal.emit(msg),
             )
             self.result_signal.emit(result)
