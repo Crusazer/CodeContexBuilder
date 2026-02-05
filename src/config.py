@@ -83,7 +83,7 @@ class AppSettings(BaseSettings):
 
                     # КРИТИЧЕСКИ ВАЖНО: Если в файле уже сохранились звездочки, игнорируем их
                     if key == "openai_api_key" and isinstance(value, str):
-                        if set(value) == {'*'}:  # Если строка состоит только из '*'
+                        if set(value) == {"*"}:  # Если строка состоит только из '*'
                             continue
                         if value == "EMPTY":
                             continue

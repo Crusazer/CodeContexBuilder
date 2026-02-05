@@ -269,6 +269,13 @@ class MainWindow(QMainWindow):
 
         preview_controls.addWidget(self.rb_file_view)
         preview_controls.addWidget(self.rb_context_view)
+
+        # New Save Button
+        self.btn_save_file = QPushButton("Save File")
+        self.btn_save_file.setEnabled(False)  # Изначально выключена
+        self.btn_save_file.clicked.connect(self.save_current_file)
+        preview_controls.addWidget(self.btn_save_file)
+
         preview_controls.addStretch()
         c_layout.addLayout(preview_controls)
 
@@ -430,17 +437,25 @@ class MainWindow(QMainWindow):
 
     def update_preview_content(self):
         # Генерируем полный контекст (Скелет или Полный) в зависимости от комбобокса
+        # Это нужно, чтобы обновить статистику токенов и кэш
         full_context = self._generate_full_context(limit_preview=False)
         self.cached_full_context = full_context
         self.update_stats_display()
 
         if self.rb_file_view.isChecked():
+            # Режим просмотра одного файла
             current = self.tree.currentItem()
             if current:
                 self.on_current_item_changed(current, None)
             else:
                 self.preview.clear()
+                self.preview.setReadOnly(True)
+                self.btn_save_file.setEnabled(False)
         else:
+            # Режим просмотра контекста
+            self.preview.setReadOnly(True)
+            self.btn_save_file.setEnabled(False)
+
             if len(full_context) > 100000:
                 self.preview.setText(
                     full_context[:100000]
@@ -461,28 +476,77 @@ class MainWindow(QMainWindow):
 
     def on_current_item_changed(self, current, previous):
         if self.rb_context_view.isChecked():
+            # В режиме контекста клик по дереву не меняет превью (превью показывает сумму выбранных)
             return
+
         if not current:
             self.preview.clear()
+            self.preview.setReadOnly(True)
+            self.btn_save_file.setEnabled(False)
             return
-        path = current.data(0, Qt.ItemDataRole.UserRole)
-        if path and Path(path).is_file():
-            self.display_file_preview(Path(path))
+
+        path_str = current.data(0, Qt.ItemDataRole.UserRole)
+        if path_str and Path(path_str).is_file():
+            self.display_file_preview(Path(path_str))
         else:
             self.preview.clear()
+            self.preview.setReadOnly(True)
+            self.btn_save_file.setEnabled(False)
 
     def display_file_preview(self, path: Path):
         try:
             if CodeProcessor.is_binary(path):
-                self.preview.setText("[Binary File]")
+                self.preview.setText("[Binary File - Editing Not Supported]")
+                self.preview.setReadOnly(True)
+                self.btn_save_file.setEnabled(False)
                 return
+
+            # Читаем файл целиком (без лимита), чтобы можно было безопасно редактировать
+            # Внимание: для очень больших файлов это может быть медленно, но необходимо для сохранения целостности
             with open(path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read(4000)
-            if len(content) == 4000:
-                content += "\n\n... (truncated) ..."
+                content = f.read()
+
             self.preview.setText(content)
+
+            # Разрешаем редактирование и сохранение для текстовых файлов
+            self.preview.setReadOnly(False)
+            self.btn_save_file.setEnabled(True)
+
         except Exception as e:
             self.preview.setText(f"[Error: {e}]")
+            self.preview.setReadOnly(True)
+            self.btn_save_file.setEnabled(False)
+
+    def save_current_file(self):
+        """Сохраняет содержимое редактора в текущий выбранный файл."""
+        if self.rb_context_view.isChecked():
+            return
+
+        current = self.tree.currentItem()
+        if not current:
+            return
+
+        path_str = current.data(0, Qt.ItemDataRole.UserRole)
+        if not path_str:
+            return
+
+        path = Path(path_str)
+        if not path.is_file():
+            return
+
+        content = self.preview.toPlainText()
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            self.statusBar().showMessage(f"Saved: {path.name}", 3000)
+
+            # Обновляем статистику, так как файл изменился (он может быть в selected_paths)
+            self.update_preview_content()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Could not save file:\n{e}")
 
     def on_item_checked(self, item, col):
         path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -491,6 +555,8 @@ class MainWindow(QMainWindow):
                 self.selected_paths.add(path)
             else:
                 self.selected_paths.discard(path)
+        # Если мы в режиме контекста, обновление галочки меняет превью.
+        # Если в режиме файла - превью не меняется (оно зависит от selection), но контекст в памяти надо обновить
         self.update_preview_content()
 
     def _generate_full_context(self, limit_preview=False) -> str:
