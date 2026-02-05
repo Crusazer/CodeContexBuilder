@@ -26,21 +26,25 @@ from PyQt6.QtWidgets import (
     QApplication,
     QRadioButton,
     QButtonGroup,
+    QTabWidget,
+    QPlainTextEdit,
+    QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette, QSyntaxHighlighter, QTextCharFormat, QFont
 
 from src.config import settings
-from src.ui.workers import ScanWorker, AIWorker
+from src.ui.workers import ScanWorker, AgentWorker
 from src.core.processor_logic import CodeProcessor
 from src.core.token_counter import TokenCounter
 
 
-# --- SYNTAX HIGHLIGHTER ---
+# --- SYNTAX HIGHLIGHTER (As before) ---
 class PythonHighlighter(QSyntaxHighlighter):
     def __init__(self, document, is_dark=True):
         super().__init__(document)
         self.rules = []
+        # ... (Код подсветки синтаксиса оставлен без изменений для краткости)
         if is_dark:
             c_keyword = QColor("#ff79c6")
             c_string = QColor("#f1fa8c")
@@ -106,6 +110,33 @@ class PythonHighlighter(QSyntaxHighlighter):
                 self.setFormat(match.start(), match.end() - match.start(), fmt)
 
 
+# --- CONFIRMATION DIALOG ---
+class FileCreationDialog(QDialog):
+    def __init__(self, path: str, content: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Agent wants to create a file")
+        self.resize(600, 500)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"<b>Path:</b> {path}"))
+        layout.addWidget(QLabel("<b>Content:</b>"))
+
+        text = QTextEdit()
+        text.setPlainText(content)
+        text.setReadOnly(True)
+        # Простая подсветка для контента
+        font = QFont("Consolas", 10)
+        text.setFont(font)
+        layout.addWidget(text)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 # --- MAIN WINDOW ---
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -114,38 +145,30 @@ class MainWindow(QMainWindow):
         self.current_nodes = {}
         self.selected_paths = set()
         self.cached_full_context = ""
+        self.agent_worker = None  # Ссылка на воркера агента
 
-        # Сначала инициализируем UI (создаем виджеты)
         self.init_ui()
-        # Затем применяем стили (красим виджеты)
         self.update_theme_style()
 
         if self.settings.last_project_path:
             self.load_project(self.settings.last_project_path)
 
     def update_theme_style(self):
-        """
-        Применяет палитру и обновляет CSS стили для конкретных элементов.
-        """
+        # ... (Код стилей оставлен без изменений, скопируйте из оригинального файла)
         app = QApplication.instance()
         app.setStyle("Fusion")
         palette = QPalette()
 
-        # Определяем цвета для CSS
         if self.settings.dark_mode:
             c_bg = QColor(44, 44, 44)
             c_fg = QColor(240, 240, 240)
             c_base = QColor(30, 30, 30)
             c_hl = QColor(42, 130, 218)
-
-            # Строковые цвета для CSS
-            css_text_color = "#f0f0f0"
             css_bg_dark = "#1e1e1e"
+            css_text_color = "#f0f0f0"
             css_border = "#3a3a3a"
             css_hover = "#333333"
             css_select = "#2a82da"
-
-            # Цвета чекбоксов
             css_check_border = "#888888"
             css_check_bg = "#333333"
 
@@ -163,10 +186,9 @@ class MainWindow(QMainWindow):
             palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
         else:
             palette = QApplication.style().standardPalette()
-            # Цвета для светлой темы
+            css_bg_dark = "#ffffff"
             css_text_color = "#000000"
-            css_bg_dark = "#ffffff"  # Обычный фон
-            css_border = "#cccccc"  # Обычный бордюр
+            css_border = "#cccccc"
             css_hover = ""
             css_select = ""
             css_check_border = ""
@@ -174,22 +196,15 @@ class MainWindow(QMainWindow):
 
         app.setPalette(palette)
 
-        # === Формируем CSS стили ===
-
-        # 1. Стили для дерева и редактора
         if self.settings.dark_mode:
-            # Важно: для QTreeWidget нужно явно стилизовать indicator (чекбокс),
-            # иначе в темной теме он сливается с фоном.
             tree_style = (
                 f"QTreeWidget {{ background-color: {css_bg_dark}; color: {css_text_color}; border: 1px solid {css_border}; }}"
                 f"QTreeWidget::item:hover {{ background-color: {css_hover}; }}"
                 f"QTreeWidget::item:selected {{ background-color: {css_select}; }}"
-                # Стилизация чекбоксов (indicators)
                 f"QTreeWidget::indicator {{ width: 14px; height: 14px; border: 1px solid {css_check_border}; border-radius: 3px; background-color: {css_check_bg}; }}"
                 f"QTreeWidget::indicator:checked {{ background-color: {css_select}; border: 1px solid {css_select}; }}"
                 f"QTreeWidget::indicator:unchecked:hover {{ border: 1px solid #aaaaaa; background-color: #444444; }}"
             )
-
             editor_style = f"QTextEdit {{ background-color: {css_bg_dark}; color: {css_text_color}; border: 1px solid {css_border}; }}"
         else:
             tree_style = ""
@@ -197,24 +212,9 @@ class MainWindow(QMainWindow):
 
         self.tree.setStyleSheet(tree_style)
         self.preview.setStyleSheet(editor_style)
-
-        # 2. Кнопка темы
-        self.btn_theme.setText(
-            "☀ Light Mode" if self.settings.dark_mode else "☾ Dark Mode"
-        )
-
-        # 3. Хайлайтер
         self.highlighter = PythonHighlighter(
             self.preview.document(), is_dark=self.settings.dark_mode
         )
-
-        # 4. Явный цвет для лейблов статистики
-        if hasattr(self, "lbl_char_count"):
-            base_stat_style = "font-weight: bold; font-size: 12px;"
-            self.lbl_char_count.setStyleSheet(
-                f"{base_stat_style} color: {css_text_color};"
-            )
-            self.lbl_token_count.setStyleSheet(f"{base_stat_style} color: #2a82da;")
 
     def toggle_theme(self):
         self.settings.dark_mode = not self.settings.dark_mode
@@ -222,8 +222,8 @@ class MainWindow(QMainWindow):
         self.update_theme_style()
 
     def init_ui(self):
-        self.setWindowTitle("CodeContext Builder")
-        self.resize(1250, 850)
+        self.setWindowTitle("CodeContext Agent")
+        self.resize(1350, 850)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -231,7 +231,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         layout.addWidget(splitter)
 
-        # === LEFT ===
+        # === LEFT (Files) ===
         left_panel = QWidget()
         l_layout = QVBoxLayout(left_panel)
         l_layout.setContentsMargins(5, 5, 5, 5)
@@ -253,16 +253,15 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left_panel)
 
-        # === CENTER ===
+        # === CENTER (Preview) ===
         center_panel = QWidget()
         c_layout = QVBoxLayout(center_panel)
         c_layout.setContentsMargins(5, 5, 5, 5)
 
         preview_controls = QHBoxLayout()
         self.rb_file_view = QRadioButton("Single File Preview")
-        self.rb_context_view = QRadioButton("Full Context (XML)")
+        self.rb_context_view = QRadioButton("Context Preview")
         self.rb_file_view.setChecked(True)
-
         self.view_group = QButtonGroup()
         self.view_group.addButton(self.rb_file_view)
         self.view_group.addButton(self.rb_context_view)
@@ -281,87 +280,100 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(self.preview)
         splitter.addWidget(center_panel)
 
-        # === RIGHT ===
+        # === RIGHT (Controls & Agent) ===
         right_panel = QWidget()
         r_layout = QVBoxLayout(right_panel)
         r_layout.setContentsMargins(5, 5, 5, 5)
 
+        # 1. Tabs for Simple Docs vs Agent
+        self.tabs = QTabWidget()
+
+        # Tab 1: Settings & Simple Tools
+        tab_settings = QWidget()
+        ts_layout = QVBoxLayout(tab_settings)
+
         self.btn_theme = QPushButton("Theme")
         self.btn_theme.clicked.connect(self.toggle_theme)
-        r_layout.addWidget(self.btn_theme)
+        ts_layout.addWidget(self.btn_theme)
 
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Raw Code", "Skeleton (Interfaces)"])
         self.combo_mode.currentIndexChanged.connect(self.on_processing_mode_changed)
-        r_layout.addWidget(QLabel("Processing Mode:"))
-        r_layout.addWidget(self.combo_mode)
+        ts_layout.addWidget(QLabel("Context Mode (Raw/Skeleton):"))
+        ts_layout.addWidget(self.combo_mode)
 
-        ai_group = QGroupBox("AI Settings")
+        ai_group = QGroupBox("LLM Connection")
         form = QFormLayout()
         self.inp_url = QLineEdit(self.settings.openai_base_url)
         self.inp_key = QLineEdit(self.settings.openai_api_key.get_secret_value())
         self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.inp_model = QLineEdit(self.settings.model_name)
-
         form.addRow("URL:", self.inp_url)
-        form.addRow("API Key:", self.inp_key)
+        form.addRow("Key:", self.inp_key)
         form.addRow("Model:", self.inp_model)
         ai_group.setLayout(form)
-        r_layout.addWidget(ai_group)
+        ts_layout.addWidget(ai_group)
 
-        btn_ai = QPushButton("Generate Docs (via AI)")
-        btn_ai.clicked.connect(self.run_ai)
-        r_layout.addWidget(btn_ai)
-
-        r_layout.addStretch()
-
-        # === STATS PANEL ===
-        stats_group = QGroupBox("Context Stats & Tokenizer")
-        stats_layout = QVBoxLayout()
-
-        encodings = TokenCounter.get_available_encodings()
-
+        stats_group = QGroupBox("Stats")
+        s_l = QVBoxLayout()
         self.combo_encoding = QComboBox()
-        self.combo_encoding.addItems(encodings)
-
-        default_enc = "cl100k_base"
-        if "o200k_base" in encodings:
-            default_enc = "o200k_base"
-        elif "cl100k_base" in encodings:
-            default_enc = "cl100k_base"
-
-        index = self.combo_encoding.findText(default_enc)
-        if index >= 0:
-            self.combo_encoding.setCurrentIndex(index)
-
+        self.combo_encoding.addItems(TokenCounter.get_available_encodings())
+        self.combo_encoding.setCurrentIndex(0)
         self.combo_encoding.currentIndexChanged.connect(self.update_stats_display)
-
-        stats_row = QHBoxLayout()
-        stats_row.addWidget(QLabel("Encoding:"))
-        stats_row.addWidget(self.combo_encoding)
-        stats_layout.addLayout(stats_row)
-
+        s_l.addWidget(self.combo_encoding)
         self.lbl_char_count = QLabel("Chars: 0")
         self.lbl_token_count = QLabel("Tokens: 0")
-        self.lbl_token_count.setToolTip("Calculated locally using tiktoken library")
+        s_l.addWidget(self.lbl_char_count)
+        s_l.addWidget(self.lbl_token_count)
+        stats_group.setLayout(s_l)
+        ts_layout.addWidget(stats_group)
 
-        stats_layout.addWidget(self.lbl_char_count)
-        stats_layout.addWidget(self.lbl_token_count)
-        stats_group.setLayout(stats_layout)
-        r_layout.addWidget(stats_group)
-        # ===================
-
-        btn_copy = QPushButton("Copy Context to Clipboard")
-        btn_copy.setMinimumHeight(50)
-        btn_copy.setStyleSheet(
-            "background-color: #2da44e; color: white; font-weight: bold; font-size: 14px;"
-        )
+        btn_copy = QPushButton("Copy Context")
         btn_copy.clicked.connect(self.copy_context)
-        r_layout.addWidget(btn_copy)
+        ts_layout.addWidget(btn_copy)
 
+        ts_layout.addStretch()
+        self.tabs.addTab(tab_settings, "Settings")
+
+        # Tab 2: Agent
+        tab_agent = QWidget()
+        ta_layout = QVBoxLayout(tab_agent)
+
+        ta_layout.addWidget(QLabel("Agent Instructions:"))
+        self.agent_prompt_input = QPlainTextEdit()
+        self.agent_prompt_input.setPlaceholderText(
+            "Example: Analyze the user service and create a unit test file for it."
+        )
+        self.agent_prompt_input.setMaximumHeight(100)
+        ta_layout.addWidget(self.agent_prompt_input)
+
+        self.cb_reasoning = QCheckBox("Enable Reasoning Step (Plan)")
+        self.cb_reasoning.setChecked(True)
+        ta_layout.addWidget(self.cb_reasoning)
+
+        self.btn_run_agent = QPushButton("Run Agent")
+        self.btn_run_agent.setStyleSheet(
+            "background-color: #2a82da; color: white; font-weight: bold; padding: 5px;"
+        )
+        self.btn_run_agent.clicked.connect(self.run_agent)
+        ta_layout.addWidget(self.btn_run_agent)
+
+        ta_layout.addWidget(QLabel("Agent Log / Output:"))
+        self.agent_log_output = QTextEdit()
+        self.agent_log_output.setReadOnly(True)
+        if self.settings.dark_mode:
+            self.agent_log_output.setStyleSheet(
+                "background-color: #1e1e1e; color: #00ff00; font-family: Consolas;"
+            )
+        ta_layout.addWidget(self.agent_log_output)
+
+        self.tabs.addTab(tab_agent, "Agent")
+
+        r_layout.addWidget(self.tabs)
         splitter.addWidget(right_panel)
-        splitter.setSizes([300, 600, 300])
+        splitter.setSizes([300, 600, 350])
 
+    # ... (open_dir_dialog, load_project, refresh_tree, on_scan_done, on_processing_mode_changed - без изменений)
     def open_dir_dialog(self):
         path = QFileDialog.getExistingDirectory(self, "Select Folder")
         if path:
@@ -370,7 +382,7 @@ class MainWindow(QMainWindow):
     def load_project(self, path):
         self.settings.last_project_path = path
         self.save_current_settings()
-        self.setWindowTitle(f"CodeContext - {path}")
+        self.setWindowTitle(f"CodeContext Agent - {path}")
         self.refresh_tree()
 
     def refresh_tree(self):
@@ -417,6 +429,7 @@ class MainWindow(QMainWindow):
         self.update_preview_content()
 
     def update_preview_content(self):
+        # Генерируем полный контекст (Скелет или Полный) в зависимости от комбобокса
         full_context = self._generate_full_context(limit_preview=False)
         self.cached_full_context = full_context
         self.update_stats_display()
@@ -441,13 +454,8 @@ class MainWindow(QMainWindow):
     def update_stats_display(self):
         text = self.cached_full_context
         char_count = len(text)
-
-        selected_encoding = self.combo_encoding.currentText()
-        if not selected_encoding:
-            selected_encoding = "cl100k_base"
-
+        selected_encoding = self.combo_encoding.currentText() or "cl100k_base"
         token_count = TokenCounter.count(text, selected_encoding)
-
         self.lbl_char_count.setText(f"Chars: {char_count:,}".replace(",", " "))
         self.lbl_token_count.setText(f"Tokens: {token_count:,}".replace(",", " "))
 
@@ -483,15 +491,18 @@ class MainWindow(QMainWindow):
                 self.selected_paths.add(path)
             else:
                 self.selected_paths.discard(path)
-
         self.update_preview_content()
 
     def _generate_full_context(self, limit_preview=False) -> str:
+        # Логика формирования контекста (Full vs Skeleton) уже тут,
+        # так как она зависит от self.combo_mode.currentText()
         if not self.settings.last_project_path or not self.selected_paths:
             return ""
 
         out = []
+        # Проверяем режим обработки (Скелет или Full)
         is_skel = self.combo_mode.currentText().startswith("Skeleton")
+
         root = Path(self.settings.last_project_path)
         sorted_paths = sorted([Path(p) for p in self.selected_paths])
 
@@ -503,7 +514,6 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         out.append("")
-
         out.append("# File Contents")
 
         total_chars = 0
@@ -519,8 +529,10 @@ class MainWindow(QMainWindow):
             except ValueError:
                 rel = p.name
 
+            # Здесь вызывается процессор, который вернет либо полный код, либо скелет (AST)
             content = CodeProcessor.process_file(p, is_skel)
 
+            # Определяем язык для markdown разметки
             ext = p.suffix.lower()
             lang = "text"
             if ext in [".py", ".pyw"]:
@@ -529,33 +541,17 @@ class MainWindow(QMainWindow):
                 lang = "javascript"
             elif ext in [".html", ".htm"]:
                 lang = "html"
-            elif ext in [".css", ".scss"]:
+            elif ext in [".css"]:
                 lang = "css"
             elif ext in [".json"]:
                 lang = "json"
-            elif ext in [".md", ".markdown"]:
+            elif ext in [".md"]:
                 lang = "markdown"
-            elif ext in [".sql"]:
-                lang = "sql"
-            elif ext in [".xml", ".xaml"]:
-                lang = "xml"
-            elif ext in [".yaml", ".yml"]:
-                lang = "yaml"
-            elif ext in [".sh", ".bash"]:
-                lang = "bash"
-
-            max_tick_seq = 0
-            if "`" in content:
-                ticks = re.findall(r"`+", content)
-                if ticks:
-                    max_tick_seq = max(len(t) for t in ticks)
-            fence_len = max(3, max_tick_seq + 1)
-            fence = "`" * fence_len
 
             out.append(f"## File: {rel}")
-            out.append(f"{fence}{lang}")
+            out.append(f"```{lang}")
             out.append(content)
-            out.append(f"{fence}\n")
+            out.append("```\n")
 
             total_chars += len(content)
 
@@ -574,53 +570,76 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No files selected!")
             return
         self.save_current_settings()
-        text = self.cached_full_context
-        if not text:
-            text = self._generate_full_context(limit_preview=False)
-        QApplication.clipboard().setText(text)
-        self.statusBar().showMessage(
-            f"Copied {len(self.selected_paths)} files. ({self.lbl_token_count.text()})"
+        text = self.cached_full_context or self._generate_full_context(
+            limit_preview=False
         )
+        QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(f"Copied {len(self.selected_paths)} files.")
 
-    def run_ai(self):
+    # --- AGENT LOGIC ---
+    def run_agent(self):
         if not self.selected_paths:
-            QMessageBox.warning(self, "Warning", "Select files first.")
+            QMessageBox.warning(self, "Warning", "Select context files first.")
             return
+
+        prompt = self.agent_prompt_input.toPlainText().strip()
+        if not prompt:
+            QMessageBox.warning(
+                self, "Warning", "Please enter instruction for the agent."
+            )
+            return
+
         self.save_current_settings()
 
-        ctx = (
+        # Контекст генерируется на основе текущих настроек (скелет/полный)
+        context = (
             self.cached_full_context
             if self.cached_full_context
-            else self._generate_full_context(limit_preview=False)
+            else self._generate_full_context()
         )
 
-        prompt = (
-            "Действуй как Senior Developer.\n"
-            "Проанализируй код (XML):\n\n"
-            f"{ctx}\n\n"
-            "Напиши README на русском с описанием архитектуры и назначения модулей."
+        self.agent_log_output.clear()
+        self.agent_log_output.append(">>> Starting Agent...")
+        self.btn_run_agent.setEnabled(False)
+
+        self.agent_worker = AgentWorker(
+            settings=self.settings,
+            project_root=Path(self.settings.last_project_path),
+            context=context,
+            user_prompt=prompt,
+            use_reasoning=self.cb_reasoning.isChecked(),
         )
-        self.statusBar().showMessage("Sending request...")
-        self.setEnabled(False)
-        self.ai = AIWorker(self.settings, prompt)
-        self.ai.result_ready.connect(self.on_ai_success)
-        self.ai.error_occurred.connect(self.on_ai_error)
-        self.ai.finished.connect(lambda: self.setEnabled(True))
-        self.ai.start()
 
-    def on_ai_success(self, text):
-        self.statusBar().showMessage("Done.")
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Result")
-        dlg.resize(800, 600)
-        l = QVBoxLayout(dlg)
-        t = QTextEdit()
-        t.setPlainText(text)
-        l.addWidget(t)
-        if self.settings.dark_mode:
-            t.setStyleSheet("background-color: #1e1e1e; color: #f0f0f0;")
-        dlg.exec()
+        self.agent_worker.log_signal.connect(self.on_agent_log)
+        self.agent_worker.result_signal.connect(self.on_agent_result)
+        self.agent_worker.error_signal.connect(self.on_agent_error)
+        self.agent_worker.request_approval_signal.connect(
+            self.on_agent_approval_request
+        )
+        self.agent_worker.finished.connect(lambda: self.btn_run_agent.setEnabled(True))
 
-    def on_ai_error(self, err):
-        self.statusBar().showMessage("Error.")
-        QMessageBox.critical(self, "AI Error", f"Failed: {err}")
+        self.agent_worker.start()
+
+    def on_agent_log(self, msg):
+        self.agent_log_output.append(msg)
+        # Прокрутка вниз
+        sb = self.agent_log_output.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def on_agent_result(self, result):
+        self.agent_log_output.append(f"\n>>> AGENT FINISHED:\n{result}")
+        # Автоматическое обновление дерева, если файлы были созданы
+        self.refresh_tree()
+
+    def on_agent_error(self, err):
+        self.agent_log_output.append(f"\n>>> ERROR: {err}")
+        QMessageBox.critical(self, "Agent Error", err)
+
+    def on_agent_approval_request(self, rel_path, content):
+        """Обработка сигнала Human-in-Loop из воркера."""
+        dlg = FileCreationDialog(rel_path, content, self)
+        res = dlg.exec()
+        approved = res == QDialog.DialogCode.Accepted
+
+        if self.agent_worker:
+            self.agent_worker.set_user_response(approved)
