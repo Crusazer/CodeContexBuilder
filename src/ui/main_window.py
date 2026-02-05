@@ -297,9 +297,19 @@ class MainWindow(QMainWindow):
         l_layout = QVBoxLayout(left_panel)
         l_layout.setContentsMargins(5, 5, 5, 5)
 
-        btn_open = QPushButton("Open Project Folder")
+        # Кнопки управления файлами
+        buttons_layout = QHBoxLayout()
+
+        btn_open = QPushButton("Open Folder")
         btn_open.clicked.connect(self.open_dir_dialog)
-        l_layout.addWidget(btn_open)
+        buttons_layout.addWidget(btn_open)
+
+        # [NEW] Кнопка сброса выбора
+        btn_reset = QPushButton("Reset Selection")
+        btn_reset.clicked.connect(self.reset_selection)
+        buttons_layout.addWidget(btn_reset)
+
+        l_layout.addLayout(buttons_layout)
 
         self.cb_ignore = QCheckBox("Hide .gitignore files")
         self.cb_ignore.setChecked(self.settings.hide_ignored_files)
@@ -444,6 +454,22 @@ class MainWindow(QMainWindow):
         r_layout.addWidget(self.tabs)
         splitter.addWidget(right_panel)
         splitter.setSizes([300, 600, 350])
+
+    def reset_selection(self):
+        """Снимает галочки со всех элементов и очищает список выбранных файлов."""
+        self.tree.blockSignals(True)  # Блокируем сигналы для производительности
+
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            iterator += 1
+
+        self.tree.blockSignals(False)
+
+        self.selected_paths.clear()
+        self.update_preview_content()
+        self.statusBar().showMessage("Selection cleared.", 2000)
 
     # ... (open_dir_dialog, load_project, refresh_tree, on_scan_done, on_processing_mode_changed - без изменений)
     def open_dir_dialog(self):
@@ -633,33 +659,49 @@ class MainWindow(QMainWindow):
         self.update_preview_content()
 
     def _generate_full_context(self, limit_preview=False) -> str:
-        # Логика формирования контекста (Full vs Skeleton) уже тут,
-        # так как она зависит от self.combo_mode.currentText()
-        if not self.settings.last_project_path or not self.selected_paths:
+        if not self.settings.last_project_path:
             return ""
 
         out = []
-        # Глобальная настройка
+        root = Path(self.settings.last_project_path)
+
+        # 1. Project Structure (ВСЯ структура проекта, а не только выбранные файлы)
+        out.append("# Project Structure")
+
+        # Если сканирование уже прошло и есть nodes, используем их
+        if self.current_nodes:
+            # Сортируем все пути
+            all_paths = sorted([n.path for n in self.current_nodes.values()])
+            for p in all_paths:
+                try:
+                    rel_path = p.relative_to(root).as_posix()
+                    # Отмечаем выбранные файлы звездочкой или просто выводим путь
+                    # Для LLM просто наличие пути достаточно, чтобы понять структуру
+                    out.append(f"{rel_path}")
+                except ValueError:
+                    pass
+        else:
+            out.append("(Project structure not yet scanned)")
+
+        out.append("")
+
+        # 2. File Contents (Только ВЫБРАННЫЕ файлы)
+        if not self.selected_paths:
+            out.append("# No files selected for content context.")
+            return "\n".join(out)
+
+        out.append("# File Contents")
+
+        sorted_selected_paths = sorted([Path(p) for p in self.selected_paths])
+
+        # Глобальная настройка режима
         global_mode_text = self.combo_mode.currentText()
         global_is_skeleton = global_mode_text.startswith("Skeleton")
-
-        root = Path(self.settings.last_project_path)
-        sorted_paths = sorted([Path(p) for p in self.selected_paths])
-
-        out.append("# Project Structure")
-        for p in sorted_paths:
-            try:
-                rel_path = p.relative_to(root).as_posix()
-                out.append(f"- {rel_path}")
-            except ValueError:
-                pass
-        out.append("")
-        out.append("# File Contents")
 
         total_chars = 0
         LIMIT = 10000
 
-        for p in sorted_paths:
+        for p in sorted_selected_paths:
             if limit_preview and total_chars > LIMIT:
                 out.append("\n... (preview truncated) ...")
                 break
