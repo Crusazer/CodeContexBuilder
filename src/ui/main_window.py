@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QDialogButtonBox,
     QMenu,
-    QTreeWidgetItemIterator,  # Добавлено для обновления цветов при смене темы
+    QTreeWidgetItemIterator,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPalette, QSyntaxHighlighter, QTextCharFormat, QFont
@@ -63,8 +63,7 @@ class FileEditDialog(QDialog):
         self.orig_edit = QTextEdit()
         self.orig_edit.setPlainText(original)
         self.orig_edit.setReadOnly(True)
-        # Apply highlighter if you have one instantiated globally or pass it
-        # self.orig_edit.setStyleSheet("background-color: #ffe6e6;") # Reddish tint
+
         orig_layout.addWidget(self.orig_edit)
 
         # New
@@ -89,12 +88,12 @@ class FileEditDialog(QDialog):
         layout.addWidget(buttons)
 
 
-# --- SYNTAX HIGHLIGHTER (As before) ---
+# --- SYNTAX HIGHLIGHTER ---
 class PythonHighlighter(QSyntaxHighlighter):
     def __init__(self, document, is_dark=True):
         super().__init__(document)
         self.rules = []
-        # ... (Код подсветки синтаксиса оставлен без изменений для краткости)
+
         if is_dark:
             c_keyword = QColor("#ff79c6")
             c_string = QColor("#f1fa8c")
@@ -205,7 +204,6 @@ class MainWindow(QMainWindow):
             self.load_project(self.settings.last_project_path)
 
     def update_theme_style(self):
-        # ... (Код стилей оставлен без изменений, скопируйте из оригинального файла)
         app = QApplication.instance()
         app.setStyle("Fusion")
         palette = QPalette()
@@ -370,7 +368,7 @@ class MainWindow(QMainWindow):
         # 1. Tabs for Simple Docs vs Agent
         self.tabs = QTabWidget()
 
-        # Tab 1: Settings & Simple Tools
+        # Tab 1: Settings
         tab_settings = QWidget()
         ts_layout = QVBoxLayout(tab_settings)
 
@@ -378,11 +376,27 @@ class MainWindow(QMainWindow):
         self.btn_theme.clicked.connect(self.toggle_theme)
         ts_layout.addWidget(self.btn_theme)
 
+        # Context Mode
         self.combo_mode = QComboBox()
         self.combo_mode.addItems(["Raw Code", "Skeleton (Interfaces)"])
         self.combo_mode.currentIndexChanged.connect(self.on_processing_mode_changed)
         ts_layout.addWidget(QLabel("Context Mode (Raw/Skeleton):"))
         ts_layout.addWidget(self.combo_mode)
+
+        # [NEW] Structure Mode
+        self.combo_structure_mode = QComboBox()
+        self.combo_structure_mode.addItems(
+            [
+                "Entire Project (Default)",
+                "Selected Files Only",
+                "No Structure (Disabled)",
+            ]
+        )
+        self.combo_structure_mode.currentIndexChanged.connect(
+            self.on_processing_mode_changed
+        )
+        ts_layout.addWidget(QLabel("Project Structure Inclusion:"))
+        ts_layout.addWidget(self.combo_structure_mode)
 
         ai_group = QGroupBox("LLM Connection")
         form = QFormLayout()
@@ -491,45 +505,51 @@ class MainWindow(QMainWindow):
         self.tree.clear()
         self.tree.setEnabled(False)
         self.preview.clear()
+
+        # FIX: Reset stats
+        self.selected_paths.clear()
+        self.cached_full_context = ""
+        self.lbl_char_count.setText("Chars: 0")
+        self.lbl_token_count.setText("Tokens: 0")
+
         self.worker = ScanWorker(path, self.settings.hide_ignored_files)
         self.worker.finished.connect(self.on_scan_done)
         self.worker.start()
 
     def on_scan_done(self, nodes):
-        self.tree.setEnabled(True)
-        self.current_nodes = {str(n.path): n for n in nodes}
-        dirs = {}
-        for n in nodes:
-            parts = n.rel_path.parts
-            parent = self.tree.invisibleRootItem()
-            curr = Path("")
-            for p in parts[:-1]:
-                curr = curr / p
-                s_rel = str(curr)
-                if s_rel not in dirs:
-                    item = QTreeWidgetItem(parent, [p])
-                    item.setFlags(
-                        item.flags()
-                        | Qt.ItemFlag.ItemIsAutoTristate
-                        | Qt.ItemFlag.ItemIsUserCheckable
-                    )
-                    item.setCheckState(0, Qt.CheckState.Unchecked)
-                    dirs[s_rel] = item
-                    parent = item
-                else:
-                    parent = dirs[s_rel]
+        self.tree.blockSignals(True)
+        try:
+            self.tree.setEnabled(True)
+            self.current_nodes = {str(n.path): n for n in nodes}
+            dirs = {}
+            for n in nodes:
+                parts = n.rel_path.parts
+                parent = self.tree.invisibleRootItem()
+                curr = Path("")
+                for p in parts[:-1]:
+                    curr = curr / p
+                    s_rel = str(curr)
+                    if s_rel not in dirs:
+                        item = QTreeWidgetItem(parent, [p])
+                        item.setFlags(
+                            item.flags()
+                            | Qt.ItemFlag.ItemIsAutoTristate
+                            | Qt.ItemFlag.ItemIsUserCheckable
+                        )
+                        item.setCheckState(0, Qt.CheckState.Unchecked)
+                        dirs[s_rel] = item
+                        parent = item
+                    else:
+                        parent = dirs[s_rel]
 
-            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-            # Убран дублирующийся блок кода создания QTreeWidgetItem
-
-            f = QTreeWidgetItem(parent, [parts[-1]])
-            f.setFlags(f.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            f.setCheckState(0, Qt.CheckState.Unchecked)
-            path_str = str(n.path)
-            f.setData(0, Qt.ItemDataRole.UserRole, path_str)
-
-            # ВОССТАНАВЛИВАЕМ ВИЗУАЛЬНУЮ МЕТКУ
-            self.update_item_label(f, path_str)
+                f = QTreeWidgetItem(parent, [parts[-1]])
+                f.setFlags(f.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                f.setCheckState(0, Qt.CheckState.Unchecked)
+                path_str = str(n.path)
+                f.setData(0, Qt.ItemDataRole.UserRole, path_str)
+                self.update_item_label(f, path_str)
+        finally:
+            self.tree.blockSignals(False)
 
     def on_processing_mode_changed(self):
         self.update_preview_content()
@@ -665,27 +685,47 @@ class MainWindow(QMainWindow):
         out = []
         root = Path(self.settings.last_project_path)
 
-        # 1. Project Structure (ВСЯ структура проекта, а не только выбранные файлы)
-        out.append("# Project Structure")
+        # === 1. Project Structure ===
+        # Получаем выбранный режим структуры из комбобокса
+        struct_mode_index = self.combo_structure_mode.currentIndex()
+        # 0 = Entire Project
+        # 1 = Selected Files Only
+        # 2 = No Structure
 
-        # Если сканирование уже прошло и есть nodes, используем их
-        if self.current_nodes:
-            # Сортируем все пути
-            all_paths = sorted([n.path for n in self.current_nodes.values()])
-            for p in all_paths:
-                try:
-                    rel_path = p.relative_to(root).as_posix()
-                    # Отмечаем выбранные файлы звездочкой или просто выводим путь
-                    # Для LLM просто наличие пути достаточно, чтобы понять структуру
-                    out.append(f"{rel_path}")
-                except ValueError:
-                    pass
+        if struct_mode_index == 2:
+            # Отключено
+            out.append("# Project Structure (Hidden)")
         else:
-            out.append("(Project structure not yet scanned)")
+            out.append("# Project Structure")
+            if struct_mode_index == 0:
+                # Вся структура (как раньше)
+                if self.current_nodes:
+                    all_paths = sorted([n.path for n in self.current_nodes.values()])
+                    for p in all_paths:
+                        try:
+                            rel_path = p.relative_to(root).as_posix()
+                            out.append(f"{rel_path}")
+                        except ValueError:
+                            pass
+                else:
+                    out.append("(Project structure not yet scanned)")
+
+            elif struct_mode_index == 1:
+                # Только выбранные файлы
+                if self.selected_paths:
+                    sorted_paths = sorted([Path(p) for p in self.selected_paths])
+                    for p in sorted_paths:
+                        try:
+                            rel_path = p.relative_to(root).as_posix()
+                            out.append(f"{rel_path}")
+                        except ValueError:
+                            pass
+                else:
+                    out.append("(No files selected)")
 
         out.append("")
 
-        # 2. File Contents (Только ВЫБРАННЫЕ файлы)
+        # === 2. File Contents ===
         if not self.selected_paths:
             out.append("# No files selected for content context.")
             return "\n".join(out)
@@ -837,10 +877,6 @@ class MainWindow(QMainWindow):
     def on_agent_edit_request(self, rel_path, original, new_code):
         """Обработка запроса на РЕДАКТИРОВАНИЕ файла."""
         dialog = FileEditDialog(rel_path, original, new_code, self)
-        # Можно добавить подсветку синтаксиса в диалог, если нужно
-        # highlighter1 = PythonHighlighter(dialog.orig_edit.document(), self.is_dark_theme)
-        # highlighter2 = PythonHighlighter(dialog.new_edit.document(), self.is_dark_theme)
-
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.agent_worker.set_user_response(True)
         else:
