@@ -87,6 +87,8 @@ class FilePanel(QWidget):
         self.tree.setHeaderHidden(True)
         self.tree.setStyleSheet(get_file_tree_qss(dark=True))
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemCollapsed.connect(self._on_item_collapsed)
+        self.tree.itemExpanded.connect(self._on_item_expanded)
         layout.addWidget(self.tree)
 
         # Статистика
@@ -104,6 +106,31 @@ class FilePanel(QWidget):
         if path:
             self.project_opened.emit(path)
 
+    # ─── Tree Behavior ───
+
+    def _on_item_collapsed(self, item: QTreeWidgetItem) -> None:
+        """Рекурсивно сворачивает все дочерние элементы при сворачивании родителя."""
+        self.tree.blockSignals(True)
+        self._collapse_descendants(item)
+        self.tree.blockSignals(False)
+
+    def _on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        """При разворачивании родителя — дочерние папки остаются свёрнутыми."""
+        self.tree.blockSignals(True)
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.childCount() > 0:
+                self.tree.collapseItem(child)
+        self.tree.blockSignals(False)
+
+    def _collapse_descendants(self, item: QTreeWidgetItem) -> None:
+        """Рекурсивно сворачивает все вложенные элементы."""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.childCount() > 0:
+                self.tree.collapseItem(child)
+                self._collapse_descendants(child)
+
     # ─── Tree Building ───
 
     def populate_tree(self, root_node: FileNode, project_path: str):
@@ -118,7 +145,10 @@ class FilePanel(QWidget):
             item = self._build_tree_item(child)
             self.tree.addTopLevelItem(item)
 
-        self.tree.expandAll()
+        self.tree.collapseAll()
+        for i in range(self.tree.topLevelItemCount()):
+            self.tree.expandItem(self.tree.topLevelItem(i))
+
         self.tree.blockSignals(False)
         self._update_stats()
 
