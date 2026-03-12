@@ -8,6 +8,7 @@ from PyQt6.QtGui import QFont
 
 from src.config import ROOT_DIR, ensure_dirs
 from src.ui.main_window import MainWindow
+from src.ui.styles import get_dark_theme_qss
 
 
 def main():
@@ -45,7 +46,9 @@ def main():
     )
     app.setPalette(palette)
 
-    app.setStyleSheet("""
+    app.setStyleSheet(
+        get_dark_theme_qss()
+        + """
         QToolTip { background-color: #2b2b2b; color: #d4d4d4; border: 1px solid #555; padding: 4px; }
         QGroupBox { font-weight: bold; border: 1px solid #555; border-radius: 4px; margin-top: 8px; padding-top: 16px; }
         QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
@@ -78,7 +81,8 @@ def main():
         QMenuBar::item:selected { background: #3c3c3c; }
         QMenu { background: #2b2b2b; border: 1px solid #555; }
         QMenu::item:selected { background: #2a82da; }
-    """)
+    """
+    )
 
     window = MainWindow()
     window.show()

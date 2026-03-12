@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from src.core.fs_scanner import FileNode, FsScanner
+from src.ui.styles import get_file_tree_qss
 
 
 class FilePanel(QWidget):
@@ -84,6 +85,7 @@ class FilePanel(QWidget):
         # Дерево
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
+        self.tree.setStyleSheet(get_file_tree_qss(dark=True))
         self.tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.tree)
 
