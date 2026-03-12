@@ -12,6 +12,7 @@ from typing import Optional
 from src.config import TEMPLATES_DIR, WORKSPACES_DIR, load_settings, save_settings
 from src.core.diff_engine import DiffEngine, DiffBlock, DiffParseResult
 from src.core.fs_scanner import FsScanner, FileNode
+from src.core.git_service import GitService  # noqa: E402 — used lazily
 from src.core.parser_logic import ContextBuilder
 from src.core.prompt_builder import PromptBuilder
 from src.core.template_manager import TemplateManager
@@ -37,6 +38,7 @@ class AppController:
         # Состояние
         self._project_root: Optional[Path] = None
         self._file_tree: Optional[FileNode] = None
+        self._git_service: Optional[GitService] = None
         self._selected_files: list[Path] = []
         self._context_mode: str = self.settings.get("default_context_mode", "full")
 
@@ -50,6 +52,7 @@ class AppController:
         """Открыть проект и просканировать."""
         self._project_root = Path(path)
         self._file_tree = self.scanner.scan(self._project_root)
+        self._git_service = GitService(self._project_root)
         self._selected_files.clear()
 
         self.settings["last_project_path"] = str(self._project_root)
@@ -67,6 +70,35 @@ class AppController:
         return self._file_tree
 
     # ─── File Selection ───
+
+    def get_changed_files(self) -> list[Path]:
+        """Получить список изменённых файлов через GitService.
+
+        Returns:
+            List of changed file paths; empty list on any error.
+        """
+        paths, _ = self.select_changed_files()
+        return paths
+
+    def select_changed_files(self) -> tuple[list[Path], str | None]:
+        """Получить изменённые файлы с обработкой ошибок.
+
+        Returns:
+            Tuple of (paths, error_message). error_message is None on success.
+        """
+        if not self._project_root or not self._git_service:
+            return [], "Project root is not set."
+
+        try:
+            if not self._git_service.is_git_repo():
+                return [], "Not a git repository"
+            paths = self._git_service.get_changed_files()
+            return paths, None
+        except RuntimeError as e:
+            return [], str(e)
+        except Exception as e:
+            logger.exception("Unexpected error getting changed files")
+            return [], f"Unexpected error: {e}"
 
     def set_selected_files(self, files: list[Path]):
         self._selected_files = list(files)

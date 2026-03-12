@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
     def _init_menu(self):
         menu = self.menuBar()
 
-        # File
+        # File (first, per standard convention)
         file_menu = menu.addMenu("&File")
         open_act = QAction("&Open Project...", self)
         open_act.setShortcut(QKeySequence("Ctrl+O"))
@@ -123,6 +123,13 @@ class MainWindow(QMainWindow):
         quit_act.setShortcut(QKeySequence("Ctrl+Q"))
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
+
+        # Edit
+        edit_menu = menu.addMenu("&Edit")
+        select_changed_act = QAction("Select &Changed Files (Git)", self)
+        select_changed_act.setShortcut(QKeySequence("Ctrl+G"))
+        select_changed_act.triggered.connect(self._select_changed_files)
+        edit_menu.addAction(select_changed_act)
 
         # Templates
         tmpl_menu = menu.addMenu("&Templates")
@@ -158,6 +165,7 @@ class MainWindow(QMainWindow):
         # File panel
         self.file_panel.project_opened.connect(self._do_open_project)
         self.file_panel.selection_changed.connect(self._on_files_selected)
+        self.file_panel.select_changed_requested.connect(self._select_changed_files)
 
         # Builder panel
         self.builder_panel.prompt_changed.connect(self._update_assembled)
@@ -191,6 +199,29 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Opened: {path}", 3000)
 
     # ─── File Selection ───
+
+    def _select_changed_files(self):
+        """Обработчик выбора изменённых файлов."""
+        if not self.ctrl.project_root:
+            QMessageBox.warning(self, "Warning", "Please open a project first.")
+            return
+
+        paths, error = self.ctrl.select_changed_files()
+
+        if error:
+            QMessageBox.warning(self, "Git Error", error)
+            return
+
+        if not paths:
+            QMessageBox.information(
+                self, "No Changes", "No changed files found in the repository."
+            )
+            return
+
+        self.file_panel.select_paths(paths)
+        self.file_panel.highlight_paths(paths)
+
+        self.statusBar().showMessage(f"Selected {len(paths)} changed files", 3000)
 
     def _on_files_selected(self, paths: list[Path]):
         self.ctrl.set_selected_files(paths)

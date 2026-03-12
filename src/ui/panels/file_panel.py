@@ -28,6 +28,9 @@ class FilePanel(QWidget):
     selection_changed = pyqtSignal(list)  # list[Path]
     project_opened = pyqtSignal(str)  # project path
 
+    #: Emitted (no args) when user requests selecting git-changed files.
+    select_changed_requested = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._node_map: dict[int, FileNode] = {}
@@ -80,6 +83,12 @@ class FilePanel(QWidget):
         btn_none = QPushButton("Clear")
         btn_none.clicked.connect(self._clear_selection)
         sel_bar.addWidget(btn_none)
+
+        self.btn_select_changed = QPushButton("🔀 Changed (Git)")
+        self.btn_select_changed.setToolTip("Select files changed since last commit")
+        self.btn_select_changed.clicked.connect(self.select_changed_requested.emit)
+        sel_bar.addWidget(self.btn_select_changed)
+
         layout.addLayout(sel_bar)
 
         # Дерево
@@ -144,6 +153,8 @@ class FilePanel(QWidget):
         for child in root_node.children:
             item = self._build_tree_item(child)
             self.tree.addTopLevelItem(item)
+
+        self.clear_highlights()
 
         self.tree.collapseAll()
         for i in range(self.tree.topLevelItemCount()):
@@ -212,6 +223,60 @@ class FilePanel(QWidget):
         self._set_check_all(self.tree.invisibleRootItem(), Qt.CheckState.Unchecked)
         self.tree.blockSignals(False)
         self._on_item_changed(None, 0)
+
+    def select_paths(self, paths: list[Path]):
+        """Программно выбрать файлы по списку путей."""
+        self.tree.blockSignals(True)
+        self._set_check_all(self.tree.invisibleRootItem(), Qt.CheckState.Unchecked)
+
+        paths_set = {p.resolve() for p in paths}
+
+        def _check_item(item: QTreeWidgetItem):
+            node: FileNode | None = item.data(0, Qt.ItemDataRole.UserRole)
+            if node and not node.is_dir and node.path.resolve() in paths_set:
+                item.setCheckState(0, Qt.CheckState.Checked)
+            for i in range(item.childCount()):
+                _check_item(item.child(i))
+
+        _check_item(self.tree.invisibleRootItem())
+        self.tree.blockSignals(False)
+        # Вызов _on_item_changed обновит UI и сгенерирует сигнал selection_changed
+        self._on_item_changed(None, 0)
+
+    def highlight_paths(self, paths: list[Path]):
+        """Подсветить изменённые файлы (оранжевым цветом)."""
+        self.clear_highlights()
+        paths_set = {p.resolve() for p in paths}
+
+        from PyQt6.QtGui import QColor, QBrush
+
+        orange_brush = QBrush(QColor("#FFA500"))
+        highlighted_parents: set[int] = set()
+
+        def _highlight(item: QTreeWidgetItem):
+            node: FileNode | None = item.data(0, Qt.ItemDataRole.UserRole)
+            if node and not node.is_dir and node.path.resolve() in paths_set:
+                item.setForeground(0, orange_brush)
+                # Подсвечиваем родительские папки (каждую не более одного раза)
+                parent = item.parent()
+                while parent and id(parent) not in highlighted_parents:
+                    highlighted_parents.add(id(parent))
+                    parent.setForeground(0, orange_brush)
+                    parent = parent.parent()
+            for i in range(item.childCount()):
+                _highlight(item.child(i))
+
+        _highlight(self.tree.invisibleRootItem())
+
+    def clear_highlights(self):
+        """Сбросить подсветку."""
+
+        def _clear(item: QTreeWidgetItem):
+            item.setData(0, Qt.ItemDataRole.ForegroundRole, None)
+            for i in range(item.childCount()):
+                _clear(item.child(i))
+
+        _clear(self.tree.invisibleRootItem())
 
     def _set_check_all(self, parent: QTreeWidgetItem, state: Qt.CheckState):
         for i in range(parent.childCount()):
