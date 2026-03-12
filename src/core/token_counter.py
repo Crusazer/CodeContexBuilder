@@ -1,32 +1,31 @@
-import tiktoken
-from typing import List
+"""Подсчёт токенов."""
+
+from __future__ import annotations
 
 
 class TokenCounter:
-    @staticmethod
-    def get_available_encodings() -> List[str]:
-        """Возвращает список доступных кодировок (например, cl100k_base, o200k_base и т.д.)"""
-        try:
-            return tiktoken.list_encoding_names()
-        except AttributeError:
-            # Fallback для старых версий библиотеки, если метод изменится
-            return ["cl100k_base", "p50k_base", "gpt2", "r50k_base"]
+    """Счётчик токенов с кешированием кодировщика."""
 
-    @staticmethod
-    def count(text: str, encoding_name: str) -> int:
-        """
-        Считает токены, используя выбранную кодировку.
-        """
-        try:
-            encoding = tiktoken.get_encoding(encoding_name)
-        except Exception:
-            # Если что-то пошло не так, пробуем самую популярную
-            try:
-                encoding = tiktoken.get_encoding("cl100k_base")
-            except Exception:
-                return 0
+    _encoders: dict[str, object] = {}
 
-        try:
-            return len(encoding.encode(text))
-        except Exception:
+    @classmethod
+    def count(cls, text: str, encoding: str = "cl100k_base") -> int:
+        """Точный подсчёт токенов через tiktoken."""
+        if not text:
             return 0
+        try:
+            import tiktoken
+
+            if encoding not in cls._encoders:
+                cls._encoders[encoding] = tiktoken.get_encoding(encoding)
+            enc = cls._encoders[encoding]
+            return len(enc.encode(text))
+        except ImportError:
+            return cls.estimate(text)
+
+    @staticmethod
+    def estimate(text: str) -> int:
+        """Грубая оценка: ~4 символа на токен для английского, ~2 для кода."""
+        if not text:
+            return 0
+        return max(1, len(text) // 3)

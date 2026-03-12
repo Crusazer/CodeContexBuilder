@@ -1,1076 +1,466 @@
-import os
-import re
-from pathlib import Path
+"""Главное окно — оркестрирует все панели через контроллер."""
 
-from pydantic import SecretStr
+from __future__ import annotations
+
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QPushButton,
-    QLabel,
-    QTextEdit,
     QSplitter,
-    QFileDialog,
-    QGroupBox,
-    QCheckBox,
-    QComboBox,
-    QLineEdit,
-    QFormLayout,
-    QMessageBox,
-    QDialog,
-    QApplication,
-    QRadioButton,
-    QButtonGroup,
     QTabWidget,
-    QPlainTextEdit,
-    QDialogButtonBox,
-    QMenu,
-    QTreeWidgetItemIterator,
+    QTextEdit,
+    QApplication,
+    QStatusBar,
+    QMenuBar,
+    QMessageBox,
+    QFileDialog,
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPalette, QSyntaxHighlighter, QTextCharFormat, QFont
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont, QAction, QKeySequence
 
-from src.config import settings
-from src.ui.workers import ScanWorker, AgentWorker
-from src.core.processor_logic import CodeProcessor
-from src.core.token_counter import TokenCounter
-from src.core.git_service import GitService
-
-
-class FileEditDialog(QDialog):
-    """Диалог для подтверждения изменения файла."""
-
-    def __init__(self, path: str, original: str, new_code: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Allow Edit? - {path}")
-        self.resize(800, 600)
-
-        layout = QVBoxLayout(self)
-
-        info_label = QLabel(f"Agent wants to EDIT: <b>{path}</b>")
-        layout.addWidget(info_label)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        # Original
-        orig_widget = QWidget()
-        orig_layout = QVBoxLayout(orig_widget)
-        orig_layout.addWidget(QLabel("Original Snippet:"))
-        self.orig_edit = QTextEdit()
-        self.orig_edit.setPlainText(original)
-        self.orig_edit.setReadOnly(True)
-
-        orig_layout.addWidget(self.orig_edit)
-
-        # New
-        new_widget = QWidget()
-        new_layout = QVBoxLayout(new_widget)
-        new_layout.addWidget(QLabel("New Snippet:"))
-        self.new_edit = QTextEdit()
-        self.new_edit.setPlainText(new_code)
-        self.new_edit.setReadOnly(True)
-        # self.new_edit.setStyleSheet("background-color: #e6ffe6;") # Greenish tint
-        new_layout.addWidget(self.new_edit)
-
-        splitter.addWidget(orig_widget)
-        splitter.addWidget(new_widget)
-        layout.addWidget(splitter)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+from src.controller import AppController
+from src.ui.panels.file_panel import FilePanel
+from src.ui.panels.prompt_builder_panel import PromptBuilderPanel
+from src.ui.panels.task_panel import TaskPanel
+from src.ui.panels.workflow_panel import WorkflowPanel
 
 
-# --- SYNTAX HIGHLIGHTER ---
-class PythonHighlighter(QSyntaxHighlighter):
-    def __init__(self, document, is_dark=True):
-        super().__init__(document)
-        self.rules = []
-
-        if is_dark:
-            c_keyword = QColor("#ff79c6")
-            c_string = QColor("#f1fa8c")
-            c_comment = QColor("#6272a4")
-            c_decor = QColor("#50fa7b")
-            c_xml = QColor("#ffb86c")
-        else:
-            c_keyword = QColor("#0033b3")
-            c_string = QColor("#067d17")
-            c_comment = QColor("#8c8c8c")
-            c_decor = QColor("#9e880d")
-            c_xml = QColor("#d65e00")
-
-        formats = {
-            "kw": QTextCharFormat(),
-            "str": QTextCharFormat(),
-            "com": QTextCharFormat(),
-            "dec": QTextCharFormat(),
-            "xml": QTextCharFormat(),
-        }
-
-        formats["kw"].setForeground(c_keyword)
-        formats["kw"].setFontWeight(QFont.Weight.Bold)
-        formats["str"].setForeground(c_string)
-        formats["com"].setForeground(c_comment)
-        formats["dec"].setForeground(c_decor)
-        formats["xml"].setForeground(c_xml)
-        formats["xml"].setFontWeight(QFont.Weight.Bold)
-
-        keywords = [
-            r"\bdef\b",
-            r"\bclass\b",
-            r"\bif\b",
-            r"\belse\b",
-            r"\bwhile\b",
-            r"\bfor\b",
-            r"\breturn\b",
-            r"\bimport\b",
-            r"\bfrom\b",
-            r"\btry\b",
-            r"\bexcept\b",
-            r"\bwith\b",
-            r"\basync\b",
-            r"\bawait\b",
-            r"\bpass\b",
-            r"\blambda\b",
-        ]
-
-        for pattern in keywords:
-            self.rules.append((re.compile(pattern), formats["kw"]))
-
-        self.rules.append((re.compile(r"@[^\n]+"), formats["dec"]))
-        self.rules.append((re.compile(r"\".*\""), formats["str"]))
-        self.rules.append((re.compile(r"'.*'"), formats["str"]))
-        self.rules.append((re.compile(r"#[^\n]*"), formats["com"]))
-        self.rules.append((re.compile(r"</?file[^>]*>"), formats["xml"]))
-        self.rules.append((re.compile(r"</?project_structure>"), formats["xml"]))
-        self.rules.append((re.compile(r"<path>.*</path>"), formats["xml"]))
-
-    def highlightBlock(self, text):
-        for pattern, fmt in self.rules:
-            for match in pattern.finditer(text):
-                self.setFormat(match.start(), match.end() - match.start(), fmt)
-
-
-# --- CONFIRMATION DIALOG ---
-class FileCreationDialog(QDialog):
-    def __init__(self, path: str, content: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Agent wants to create a file")
-        self.resize(600, 500)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"<b>Path:</b> {path}"))
-        layout.addWidget(QLabel("<b>Content:</b>"))
-
-        text = QTextEdit()
-        text.setPlainText(content)
-        text.setReadOnly(True)
-        # Простая подсветка для контента
-        font = QFont("Consolas", 10)
-        text.setFont(font)
-        layout.addWidget(text)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-
-# --- MAIN WINDOW ---
 class MainWindow(QMainWindow):
+    """Главное окно Prompt Workshop."""
+
     def __init__(self):
         super().__init__()
-        self.settings = settings
-        self.current_nodes = {}
-        self.selected_paths = set()
-        self.cached_full_context = ""
-        self.agent_worker = None  # Ссылка на воркера агента
-        self.file_overrides = {}
+        self.ctrl = AppController()
+        self._diff_blocks = []
 
-        self.init_ui()
-        self.update_theme_style()
+        self.setWindowTitle("Prompt Workshop")
+        self.setMinimumSize(1200, 700)
 
-        if self.settings.last_project_path:
-            self.load_project(self.settings.last_project_path)
+        self._init_ui()
+        self._init_menu()
+        self._connect_signals()
+        self._init_shortcuts()
 
-    def update_theme_style(self):
-        app = QApplication.instance()
-        app.setStyle("Fusion")
-        palette = QPalette()
+        # Открыть последний проект
+        last = self.ctrl.settings.get("last_project_path", "")
+        if last and Path(last).is_dir():
+            self._do_open_project(last)
 
-        if self.settings.dark_mode:
-            c_bg = QColor(44, 44, 44)
-            c_fg = QColor(240, 240, 240)
-            c_base = QColor(30, 30, 30)
-            c_hl = QColor(42, 130, 218)
-            css_bg_dark = "#1e1e1e"
-            css_text_color = "#f0f0f0"
-            css_border = "#3a3a3a"
-            css_hover = "#333333"
-            css_select = "#2a82da"
-            css_check_border = "#888888"
-            css_check_bg = "#333333"
+        self.statusBar().showMessage("Ready. Open a project folder to start.", 5000)
 
-            palette.setColor(QPalette.ColorRole.Window, c_bg)
-            palette.setColor(QPalette.ColorRole.WindowText, c_fg)
-            palette.setColor(QPalette.ColorRole.Base, c_base)
-            palette.setColor(QPalette.ColorRole.AlternateBase, c_bg)
-            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
-            palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
-            palette.setColor(QPalette.ColorRole.Text, c_fg)
-            palette.setColor(QPalette.ColorRole.Button, c_bg)
-            palette.setColor(QPalette.ColorRole.ButtonText, c_fg)
-            palette.setColor(QPalette.ColorRole.Link, c_hl)
-            palette.setColor(QPalette.ColorRole.Highlight, c_hl)
-            palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
-        else:
-            palette = QApplication.style().standardPalette()
-            css_bg_dark = "#ffffff"
-            css_text_color = "#000000"
-            css_border = "#cccccc"
-            css_hover = ""
-            css_select = ""
-            css_check_border = ""
-            css_check_bg = ""
-
-        app.setPalette(palette)
-
-        if self.settings.dark_mode:
-            tree_style = (
-                f"QTreeWidget {{ background-color: {css_bg_dark}; color: {css_text_color}; border: 1px solid {css_border}; }}"
-                f"QTreeWidget::item:hover {{ background-color: {css_hover}; }}"
-                f"QTreeWidget::item:selected {{ background-color: {css_select}; }}"
-                f"QTreeWidget::indicator {{ width: 14px; height: 14px; border: 1px solid {css_check_border}; border-radius: 3px; background-color: {css_check_bg}; }}"
-                f"QTreeWidget::indicator:checked {{ background-color: {css_select}; border: 1px solid {css_select}; }}"
-                f"QTreeWidget::indicator:unchecked:hover {{ border: 1px solid #aaaaaa; background-color: #444444; }}"
-            )
-            editor_style = f"QTextEdit {{ background-color: {css_bg_dark}; color: {css_text_color}; border: 1px solid {css_border}; }}"
-        else:
-            tree_style = ""
-            editor_style = ""
-
-        self.tree.setStyleSheet(tree_style)
-        self.preview.setStyleSheet(editor_style)
-        self.highlighter = PythonHighlighter(
-            self.preview.document(), is_dark=self.settings.dark_mode
-        )
-
-    def toggle_theme(self):
-        self.settings.dark_mode = not self.settings.dark_mode
-        self.settings.save()
-        self.update_theme_style()
-
-        # Принудительно обновляем цвета меток (SKEL/FULL) в дереве,
-        # так как они зависят от dark_mode в update_item_label
-        iterator = QTreeWidgetItemIterator(self.tree)
-        while iterator.value():
-            item = iterator.value()
-            path_str = item.data(0, Qt.ItemDataRole.UserRole)
-            if path_str:
-                self.update_item_label(item, path_str)
-            iterator += 1
-
-    def init_ui(self):
-        self.setWindowTitle("CodeContext Agent")
-        self.resize(1350, 850)
-
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+    def _init_ui(self):
+        # Главный сплиттер
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(splitter)
 
-        # === LEFT (Files) ===
-        left_panel = QWidget()
-        l_layout = QVBoxLayout(left_panel)
-        l_layout.setContentsMargins(5, 5, 5, 5)
+        # ─── ЛЕВАЯ ПАНЕЛЬ: Файлы ───
+        self.file_panel = FilePanel()
+        self.file_panel.setMinimumWidth(220)
+        self.file_panel.setMaximumWidth(400)
+        splitter.addWidget(self.file_panel)
 
-        # Кнопки управления файлами
-        buttons_layout = QHBoxLayout()
+        # ─── ЦЕНТР: Превью ───
+        self.preview_tabs = QTabWidget()
 
-        btn_open = QPushButton("Open Folder")
-        btn_open.clicked.connect(self.open_dir_dialog)
-        buttons_layout.addWidget(btn_open)
+        # Превью файла
+        self.file_preview = QTextEdit()
+        self.file_preview.setReadOnly(True)
+        self.file_preview.setFont(QFont("Consolas", 11))
+        self.file_preview.setPlaceholderText("Select files and they will appear here.")
+        self.preview_tabs.addTab(self.file_preview, "📄 File Preview")
 
-        # [NEW] Кнопка сброса выбора
-        btn_reset = QPushButton("Reset Selection")
-        btn_reset.clicked.connect(self.reset_selection)
-        buttons_layout.addWidget(btn_reset)
-
-        # [NEW] Кнопка загрузки изменённых файлов
-        btn_changed = QPushButton("Load Changed Files")
-        btn_changed.clicked.connect(self.load_changed_files)
-        buttons_layout.addWidget(btn_changed)
-
-        l_layout.addLayout(buttons_layout)
-
-        self.cb_ignore = QCheckBox("Hide .gitignore files")
-        self.cb_ignore.setChecked(self.settings.hide_ignored_files)
-        self.cb_ignore.toggled.connect(self.refresh_tree)
-        l_layout.addWidget(self.cb_ignore)
-
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabel("Project Files")
-        self.tree.itemChanged.connect(self.on_item_checked)
-        self.tree.currentItemChanged.connect(self.on_current_item_changed)
-
-        # Настройка контекстного меню
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
-        l_layout.addWidget(self.tree)
-
-        splitter.addWidget(left_panel)
-
-        # === CENTER (Preview) ===
-        center_panel = QWidget()
-        c_layout = QVBoxLayout(center_panel)
-        c_layout.setContentsMargins(5, 5, 5, 5)
-
-        preview_controls = QHBoxLayout()
-        self.rb_file_view = QRadioButton("Single File Preview")
-        self.rb_context_view = QRadioButton("Context Preview")
-        self.rb_file_view.setChecked(True)
-        self.view_group = QButtonGroup()
-        self.view_group.addButton(self.rb_file_view)
-        self.view_group.addButton(self.rb_context_view)
-        self.view_group.buttonToggled.connect(self.update_preview_content)
-
-        preview_controls.addWidget(self.rb_file_view)
-        preview_controls.addWidget(self.rb_context_view)
-
-        # New Save Button
-        self.btn_save_file = QPushButton("Save File")
-        self.btn_save_file.setEnabled(False)  # Изначально выключена
-        self.btn_save_file.clicked.connect(self.save_current_file)
-        preview_controls.addWidget(self.btn_save_file)
-
-        preview_controls.addStretch()
-        c_layout.addLayout(preview_controls)
-
-        self.preview = QTextEdit()
-        self.preview.setReadOnly(True)
-        font = QFont("Consolas" if os.name == "nt" else "Menlo", 11)
-        self.preview.setFont(font)
-
-        c_layout.addWidget(self.preview)
-        splitter.addWidget(center_panel)
-
-        # === RIGHT (Controls & Agent) ===
-        right_panel = QWidget()
-        r_layout = QVBoxLayout(right_panel)
-        r_layout.setContentsMargins(5, 5, 5, 5)
-
-        # 1. Tabs for Simple Docs vs Agent
-        self.tabs = QTabWidget()
-
-        # Tab 1: Settings
-        tab_settings = QWidget()
-        ts_layout = QVBoxLayout(tab_settings)
-
-        self.btn_theme = QPushButton("Theme")
-        self.btn_theme.clicked.connect(self.toggle_theme)
-        ts_layout.addWidget(self.btn_theme)
-
-        # Context Mode
-        self.combo_mode = QComboBox()
-        self.combo_mode.addItems(["Raw Code", "Skeleton (Interfaces)"])
-        self.combo_mode.currentIndexChanged.connect(self.on_processing_mode_changed)
-        ts_layout.addWidget(QLabel("Context Mode (Raw/Skeleton):"))
-        ts_layout.addWidget(self.combo_mode)
-
-        # [NEW] Structure Mode
-        self.combo_structure_mode = QComboBox()
-        self.combo_structure_mode.addItems(
-            [
-                "Entire Project (Default)",
-                "Selected Files Only",
-                "No Structure (Disabled)",
-            ]
+        # Собранный промпт
+        self.assembled_preview = QTextEdit()
+        self.assembled_preview.setReadOnly(True)
+        self.assembled_preview.setFont(QFont("Consolas", 10))
+        self.assembled_preview.setPlaceholderText(
+            "Assembled prompt will appear here.\n"
+            "Configure role, skills, rules in Builder tab,\n"
+            "write your task in Task tab, then Copy."
         )
-        self.combo_structure_mode.currentIndexChanged.connect(
-            self.on_processing_mode_changed
-        )
-        ts_layout.addWidget(QLabel("Project Structure Inclusion:"))
-        ts_layout.addWidget(self.combo_structure_mode)
+        self.preview_tabs.addTab(self.assembled_preview, "📋 Assembled Prompt")
 
-        ai_group = QGroupBox("LLM Connection")
-        form = QFormLayout()
-        self.inp_url = QLineEdit(self.settings.openai_base_url)
-        self.inp_key = QLineEdit(self.settings.openai_api_key.get_secret_value())
-        self.inp_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.inp_model = QLineEdit(self.settings.model_name)
-        form.addRow("URL:", self.inp_url)
-        form.addRow("Key:", self.inp_key)
-        form.addRow("Model:", self.inp_model)
-        ai_group.setLayout(form)
-        ts_layout.addWidget(ai_group)
+        # Diff превью
+        self.diff_preview = QTextEdit()
+        self.diff_preview.setReadOnly(True)
+        self.diff_preview.setFont(QFont("Consolas", 10))
+        self.preview_tabs.addTab(self.diff_preview, "🔀 Diff Preview")
 
-        stats_group = QGroupBox("Stats")
-        s_l = QVBoxLayout()
-        self.combo_encoding = QComboBox()
-        self.combo_encoding.addItems(TokenCounter.get_available_encodings())
-        self.combo_encoding.setCurrentIndex(0)
-        self.combo_encoding.currentIndexChanged.connect(self.update_stats_display)
-        s_l.addWidget(self.combo_encoding)
-        self.lbl_char_count = QLabel("Chars: 0")
-        self.lbl_token_count = QLabel("Tokens: 0")
-        s_l.addWidget(self.lbl_char_count)
-        s_l.addWidget(self.lbl_token_count)
-        stats_group.setLayout(s_l)
-        ts_layout.addWidget(stats_group)
+        splitter.addWidget(self.preview_tabs)
 
-        btn_copy = QPushButton("Copy Context")
-        btn_copy.clicked.connect(self.copy_context)
-        ts_layout.addWidget(btn_copy)
+        # ─── ПРАВАЯ ПАНЕЛЬ: Табы инструментов ───
+        self.right_tabs = QTabWidget()
 
-        ts_layout.addStretch()
-        self.tabs.addTab(tab_settings, "Settings")
+        self.builder_panel = PromptBuilderPanel(self.ctrl.template_manager)
+        self.right_tabs.addTab(self.builder_panel, "🔧 Builder")
 
-        # Tab 2: Agent
-        tab_agent = QWidget()
-        ta_layout = QVBoxLayout(tab_agent)
+        self.task_panel = TaskPanel()
+        self.right_tabs.addTab(self.task_panel, "📝 Task")
 
-        ta_layout.addWidget(QLabel("Agent Instructions:"))
-        self.agent_prompt_input = QPlainTextEdit()
-        self.agent_prompt_input.setPlaceholderText(
-            "Example: Analyze the user service and create a unit test file for it."
-        )
-        self.agent_prompt_input.setMaximumHeight(100)
-        ta_layout.addWidget(self.agent_prompt_input)
+        self.workflow_panel = WorkflowPanel()
+        self.right_tabs.addTab(self.workflow_panel, "🔄 Workflow")
 
-        self.cb_reasoning = QCheckBox("Enable Reasoning Step (Plan)")
-        self.cb_reasoning.setChecked(True)
-        ta_layout.addWidget(self.cb_reasoning)
+        self.right_tabs.setMinimumWidth(300)
+        self.right_tabs.setMaximumWidth(500)
+        splitter.addWidget(self.right_tabs)
 
-        self.btn_run_agent = QPushButton("Run Agent")
-        self.btn_run_agent.setStyleSheet(
-            "background-color: #2a82da; color: white; font-weight: bold; padding: 5px;"
-        )
-        self.btn_run_agent.clicked.connect(self.run_agent)
-        ta_layout.addWidget(self.btn_run_agent)
+        splitter.setSizes([280, 600, 350])
+        self.setCentralWidget(splitter)
 
-        ta_layout.addWidget(QLabel("Agent Log / Output:"))
-        self.agent_log_output = QTextEdit()
-        self.agent_log_output.setReadOnly(True)
-        if self.settings.dark_mode:
-            self.agent_log_output.setStyleSheet(
-                "background-color: #1e1e1e; color: #00ff00; font-family: Consolas;"
+        # Статусбар
+        self.setStatusBar(QStatusBar())
+
+    def _init_menu(self):
+        menu = self.menuBar()
+
+        # File
+        file_menu = menu.addMenu("&File")
+        open_act = QAction("&Open Project...", self)
+        open_act.setShortcut(QKeySequence("Ctrl+O"))
+        open_act.triggered.connect(self._menu_open_project)
+        file_menu.addAction(open_act)
+        file_menu.addSeparator()
+        quit_act = QAction("&Quit", self)
+        quit_act.setShortcut(QKeySequence("Ctrl+Q"))
+        quit_act.triggered.connect(self.close)
+        file_menu.addAction(quit_act)
+
+        # Templates
+        tmpl_menu = menu.addMenu("&Templates")
+        edit_act = QAction("&Edit Templates...", self)
+        edit_act.triggered.connect(self._open_template_editor)
+        tmpl_menu.addAction(edit_act)
+        reload_act = QAction("&Reload Templates", self)
+        reload_act.triggered.connect(self._reload_templates)
+        tmpl_menu.addAction(reload_act)
+
+        # Help
+        help_menu = menu.addMenu("&Help")
+        about_act = QAction("&About", self)
+        about_act.triggered.connect(
+            lambda: QMessageBox.about(
+                self,
+                "Prompt Workshop",
+                "Modular prompt constructor for LLM-assisted coding.\n\n"
+                "Build prompts from roles, skills, rules, and project context.\n"
+                "Apply SEARCH/REPLACE diffs from model responses.",
             )
-        ta_layout.addWidget(self.agent_log_output)
+        )
+        help_menu.addAction(about_act)
 
-        self.tabs.addTab(tab_agent, "Agent")
+    def _init_shortcuts(self):
+        """Горячие клавиши."""
+        # Ctrl+Shift+C — копировать промпт
+        pass  # Handled through menu/buttons
 
-        r_layout.addWidget(self.tabs)
-        splitter.addWidget(right_panel)
-        splitter.setSizes([300, 600, 350])
+    def _connect_signals(self):
+        """Соединить сигналы всех панелей."""
 
-    def reset_selection(self):
-        """Снимает галочки со всех элементов и очищает список выбранных файлов."""
-        self.tree.blockSignals(True)  # Блокируем сигналы для производительности
+        # File panel
+        self.file_panel.project_opened.connect(self._do_open_project)
+        self.file_panel.selection_changed.connect(self._on_files_selected)
 
-        iterator = QTreeWidgetItemIterator(self.tree)
-        while iterator.value():
-            item = iterator.value()
-            item.setCheckState(0, Qt.CheckState.Unchecked)
-            iterator += 1
+        # Builder panel
+        self.builder_panel.prompt_changed.connect(self._update_assembled)
 
-        self.tree.blockSignals(False)
+        # Task panel
+        self.task_panel.task_changed.connect(self._update_assembled)
+        self.task_panel.copy_requested.connect(self._copy_prompt)
+        self.task_panel.parse_diffs_requested.connect(self._parse_diffs)
+        self.task_panel.apply_diffs_requested.connect(self._apply_diffs)
+        self.task_panel.save_step_result_requested.connect(self._save_step_result)
 
-        self.selected_paths.clear()
-        self.update_preview_content()
-        self.statusBar().showMessage("Selection cleared.", 2000)
+        # Workflow panel
+        self.workflow_panel.workflow_start_requested.connect(self._start_workflow)
+        self.workflow_panel.workflow_stop_requested.connect(self._stop_workflow)
+        self.workflow_panel.advance_requested.connect(self._advance_workflow)
+        self.workflow_panel.skip_requested.connect(self._skip_workflow)
+        self.workflow_panel.save_workspace_requested.connect(self._save_workspace)
+        self.workflow_panel.load_workspace_requested.connect(self._load_workspace)
 
-    def load_changed_files(self):
-        """Загружает файлы, изменённые с последнего коммита, и выбирает их."""
-        if not self.settings.last_project_path:
-            QMessageBox.warning(self, "Warning", "Open a project folder first.")
-            return
+    # ─── Project ───
 
-        repo_path = Path(self.settings.last_project_path)
-        git_service = GitService(repo_path)
-
-        try:
-            changed_files = git_service.get_changed_files()
-        except Exception as e:
-            QMessageBox.warning(
-                self, "Git Error", f"Failed to get changed files:\n{e}"
-            )
-            return
-
-        if not changed_files:
-            QMessageBox.information(
-                self, "No Changes", "No files changed since last commit."
-            )
-            return
-
-        # Снимаем текущее выделение
-        self.reset_selection()
-
-        # Выбираем изменённые файлы в дереве
-        self.tree.blockSignals(True)
-        selected_count = 0
-        not_found_count = 0
-
-        for file_path in changed_files:
-            path_str = str(file_path)
-            # Находим элемент в дереве по пути
-            item_found = False
-            iterator = QTreeWidgetItemIterator(self.tree)
-            while iterator.value():
-                item = iterator.value()
-                item_path = item.data(0, Qt.ItemDataRole.UserRole)
-                if item_path == path_str:
-                    item.setCheckState(0, Qt.CheckState.Checked)
-                    # Разворачиваем родительские элементы для видимости
-                    parent = item.parent()
-                    while parent:
-                        parent.setExpanded(True)
-                        parent = parent.parent()
-                    item_found = True
-                    # Добавляем в selected_paths
-                    self.selected_paths.add(path_str)
-                    selected_count += 1
-                    break
-                iterator += 1
-            
-            if not item_found:
-                not_found_count += 1
-
-        self.tree.blockSignals(False)
-
-        # Обновляем превью
-        self.update_preview_content()
-
-        # Показываем сообщение с деталями
-        msg = f"✓ Selected {selected_count} changed file(s)"
-        if not_found_count > 0:
-            msg += f" ({not_found_count} not in tree)"
-        self.statusBar().showMessage(msg, 5000)
-        
-        # Переключаем на режим контекста для удобного просмотра
-        self.rb_context_view.setChecked(True)
-        
-        # Явно обновляем превью после переключения
-        self.update_preview_content()
-
-    # ... (open_dir_dialog, load_project, refresh_tree, on_scan_done, on_processing_mode_changed - без изменений)
-    def open_dir_dialog(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Folder")
+    def _menu_open_project(self):
+        path = QFileDialog.getExistingDirectory(self, "Open Project")
         if path:
-            self.load_project(path)
+            self._do_open_project(path)
 
-    def load_project(self, path):
-        self.settings.last_project_path = path
-        self.save_current_settings()
-        self.setWindowTitle(f"CodeContext Agent - {path}")
-        self.refresh_tree()
+    def _do_open_project(self, path: str):
+        tree = self.ctrl.open_project(path)
+        self.file_panel.populate_tree(tree, path)
+        self.setWindowTitle(f"Prompt Workshop — {Path(path).name}")
+        self.statusBar().showMessage(f"Opened: {path}", 3000)
 
-    def refresh_tree(self):
-        path = self.settings.last_project_path
-        if not path:
+    # ─── File Selection ───
+
+    def _on_files_selected(self, paths: list[Path]):
+        self.ctrl.set_selected_files(paths)
+        self.ctrl.context_mode = self.file_panel.get_context_mode()
+
+        # Показать превью контекста
+        if paths:
+            context = self.ctrl.build_context()
+            self.file_preview.setText(context)
+        else:
+            self.file_preview.clear()
+
+        self._update_assembled()
+
+    # ─── Prompt Assembly ───
+
+    def _sync_builder_from_panel(self):
+        """Синхронизировать PromptBuilder с выбором в UI."""
+        b = self.ctrl.prompt_builder
+
+        # Роль
+        role = self.builder_panel.get_selected_role()
+        if role:
+            b.set_role(role)
+        else:
+            b.clear_role()
+
+        # Скиллы — сбросить и добавить заново
+        b._assembly.skills.clear()
+        for s in self.builder_panel.get_selected_skills():
+            b.add_skill(s)
+
+        # Правила
+        b._assembly.rules.clear()
+        for r in self.builder_panel.get_selected_rules():
+            b.add_rule(r)
+
+        # Формат
+        fmt = self.builder_panel.get_selected_format()
+        if fmt:
+            b.set_output_format(fmt)
+        else:
+            b.clear_output_format()
+
+    def _update_assembled(self):
+        """Пересобрать промпт и обновить превью."""
+        self._sync_builder_from_panel()
+
+        task = self.task_panel.get_task()
+        extra = self.task_panel.get_extra()
+        prompt = self.ctrl.assemble_prompt(task, extra)
+
+        self.assembled_preview.setText(prompt)
+
+        stats = self.ctrl.get_prompt_stats()
+        self.task_panel.set_stats(stats["total_tokens"], stats["total_chars"])
+
+        wf = self.ctrl.workflow_engine.active_workflow
+        wf_info = f" | Workflow: {wf.name} {wf.progress}" if wf else ""
+        self.statusBar().showMessage(
+            f"Tokens: ~{stats['total_tokens']:,} | "
+            f"Files: {stats['file_count']}{wf_info}"
+        )
+
+    # ─── Copy ───
+
+    def _copy_prompt(self):
+        self._update_assembled()
+        text = self.assembled_preview.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"✅ Copied! ~{len(text):,} chars", 3000)
+            # Переключить на вкладку Assembled
+            self.preview_tabs.setCurrentWidget(self.assembled_preview)
+        else:
+            self.statusBar().showMessage("⚠️ Nothing to copy", 3000)
+
+    # ─── Diffs ───
+
+    def _parse_diffs(self, text: str):
+        if not text.strip():
+            self.task_panel.set_diff_status("⚠️ No response text")
             return
-        self.settings.hide_ignored_files = self.cb_ignore.isChecked()
-        self.tree.clear()
-        self.tree.setEnabled(False)
-        self.preview.clear()
 
-        # FIX: Reset stats
-        self.selected_paths.clear()
-        self.cached_full_context = ""
-        self.lbl_char_count.setText("Chars: 0")
-        self.lbl_token_count.setText("Tokens: 0")
+        result = self.ctrl.parse_diffs(text)
+        self._diff_blocks = result.blocks
 
-        self.worker = ScanWorker(path, self.settings.hide_ignored_files)
-        self.worker.finished.connect(self.on_scan_done)
-        self.worker.start()
+        if result.blocks:
+            # Dry run
+            if self.ctrl.project_root:
+                dry = self.ctrl.dry_run_diffs(result.blocks)
+                ok = sum(1 for b in dry if b.applied)
+                err = sum(1 for b in dry if b.error)
+                self.task_panel.set_diff_status(
+                    f"✅ Found {len(result.blocks)} block(s). "
+                    f"Dry run: {ok} ok, {err} errors.",
+                    enable_apply=ok > 0,
+                )
 
-    def on_scan_done(self, nodes):
-        self.tree.blockSignals(True)
-        try:
-            self.tree.setEnabled(True)
-            self.current_nodes = {str(n.path): n for n in nodes}
-            dirs = {}
-            for n in nodes:
-                parts = n.rel_path.parts
-                parent = self.tree.invisibleRootItem()
-                curr = Path("")
-                for p in parts[:-1]:
-                    curr = curr / p
-                    s_rel = str(curr)
-                    if s_rel not in dirs:
-                        item = QTreeWidgetItem(parent, [p])
-                        item.setFlags(
-                            item.flags()
-                            | Qt.ItemFlag.ItemIsAutoTristate
-                            | Qt.ItemFlag.ItemIsUserCheckable
-                        )
-                        item.setCheckState(0, Qt.CheckState.Unchecked)
-                        dirs[s_rel] = item
-                        parent = item
+                # Показать детали в diff preview
+                lines = []
+                for i, b in enumerate(dry):
+                    status = "✅" if b.applied else f"❌ {b.error}"
+                    lines.append(f"Block {i + 1}: {b.file_path} — {status}")
+                    if b.is_new_file:
+                        lines.append(f"  (new file, {len(b.replace)} chars)")
                     else:
-                        parent = dirs[s_rel]
-
-                f = QTreeWidgetItem(parent, [parts[-1]])
-                f.setFlags(f.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                f.setCheckState(0, Qt.CheckState.Unchecked)
-                path_str = str(n.path)
-                f.setData(0, Qt.ItemDataRole.UserRole, path_str)
-                self.update_item_label(f, path_str)
-        finally:
-            self.tree.blockSignals(False)
-
-    def on_processing_mode_changed(self):
-        self.update_preview_content()
-
-    def update_preview_content(self):
-        # Генерируем полный контекст (Скелет или Полный) в зависимости от комбобокса
-        # Это нужно, чтобы обновить статистику токенов и кэш
-        full_context = self._generate_full_context(limit_preview=False)
-        self.cached_full_context = full_context
-        self.update_stats_display()
-
-        if self.rb_file_view.isChecked():
-            # Режим просмотра одного файла
-            current = self.tree.currentItem()
-            if current:
-                self.on_current_item_changed(current, None)
+                        lines.append(f"  SEARCH: {len(b.search)} chars")
+                        lines.append(f"  REPLACE: {len(b.replace)} chars")
+                    lines.append("")
+                self.diff_preview.setText("\n".join(lines))
+                self.preview_tabs.setCurrentWidget(self.diff_preview)
             else:
-                self.preview.clear()
-                self.preview.setReadOnly(True)
-                self.btn_save_file.setEnabled(False)
-        else:
-            # Режим просмотра контекста
-            self.preview.setReadOnly(True)
-            self.btn_save_file.setEnabled(False)
-
-            if len(full_context) > 100000:
-                self.preview.setText(
-                    full_context[:100000]
-                    + "\n\n... (preview truncated for UI performance, but Stats show full size) ..."
+                self.task_panel.set_diff_status(
+                    f"✅ Found {len(result.blocks)} block(s). Open a project to apply.",
+                    enable_apply=False,
                 )
-            else:
-                self.preview.setText(
-                    full_context if full_context else "No files selected."
-                )
-
-    def update_stats_display(self):
-        text = self.cached_full_context
-        char_count = len(text)
-        selected_encoding = self.combo_encoding.currentText() or "cl100k_base"
-        token_count = TokenCounter.count(text, selected_encoding)
-        self.lbl_char_count.setText(f"Chars: {char_count:,}".replace(",", " "))
-        self.lbl_token_count.setText(f"Tokens: {token_count:,}".replace(",", " "))
-
-    def on_current_item_changed(self, current, previous):
-        if self.rb_context_view.isChecked():
-            # В режиме контекста клик по дереву не меняет превью (превью показывает сумму выбранных)
-            return
-
-        if not current:
-            self.preview.clear()
-            self.preview.setReadOnly(True)
-            self.btn_save_file.setEnabled(False)
-            return
-
-        path_str = current.data(0, Qt.ItemDataRole.UserRole)
-        if path_str and Path(path_str).is_file():
-            self.display_file_preview(Path(path_str))
         else:
-            self.preview.clear()
-            self.preview.setReadOnly(True)
-            self.btn_save_file.setEnabled(False)
+            msg = "; ".join(result.warnings) if result.warnings else "No blocks found"
+            self.task_panel.set_diff_status(f"⚠️ {msg}")
 
-    def display_file_preview(self, path: Path):
-        try:
-            if CodeProcessor.is_binary(path):
-                self.preview.setText("[Binary File - Editing Not Supported]")
-                self.preview.setReadOnly(True)
-                self.btn_save_file.setEnabled(False)
-                return
-
-            # Читаем файл целиком (без лимита), чтобы можно было безопасно редактировать
-            # Внимание: для очень больших файлов это может быть медленно, но необходимо для сохранения целостности
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-
-            self.preview.setText(content)
-
-            # Разрешаем редактирование и сохранение для текстовых файлов
-            self.preview.setReadOnly(False)
-            self.btn_save_file.setEnabled(True)
-
-        except Exception as e:
-            self.preview.setText(f"[Error: {e}]")
-            self.preview.setReadOnly(True)
-            self.btn_save_file.setEnabled(False)
-
-    def save_current_file(self):
-        """Сохраняет содержимое редактора в текущий выбранный файл."""
-        if self.rb_context_view.isChecked():
+    def _apply_diffs(self):
+        if not self._diff_blocks or not self.ctrl.project_root:
             return
 
-        current = self.tree.currentItem()
-        if not current:
-            return
-
-        path_str = current.data(0, Qt.ItemDataRole.UserRole)
-        if not path_str:
-            return
-
-        path = Path(path_str)
-        if not path.is_file():
-            return
-
-        content = self.preview.toPlainText()
-
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-
-            self.statusBar().showMessage(f"Saved: {path.name}", 3000)
-
-            # Обновляем статистику, так как файл изменился (он может быть в selected_paths)
-            self.update_preview_content()
-
-        except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"Could not save file:\n{e}")
-
-    def on_item_checked(self, item, col):
-        path = item.data(0, Qt.ItemDataRole.UserRole)
-        if path:
-            if item.checkState(0) == Qt.CheckState.Checked:
-                self.selected_paths.add(path)
-            else:
-                self.selected_paths.discard(path)
-        # Если мы в режиме контекста, обновление галочки меняет превью.
-        # Если в режиме файла - превью не меняется (оно зависит от selection), но контекст в памяти надо обновить
-        self.update_preview_content()
-
-    def _generate_full_context(self, limit_preview=False) -> str:
-        if not self.settings.last_project_path:
-            return ""
-
-        out = []
-        root = Path(self.settings.last_project_path)
-
-        # === 1. Project Structure ===
-        # Получаем выбранный режим структуры из комбобокса
-        struct_mode_index = self.combo_structure_mode.currentIndex()
-        # 0 = Entire Project
-        # 1 = Selected Files Only
-        # 2 = No Structure
-
-        if struct_mode_index == 2:
-            # Отключено
-            out.append("# Project Structure (Hidden)")
-        else:
-            out.append("# Project Structure")
-            if struct_mode_index == 0:
-                # Вся структура (как раньше)
-                if self.current_nodes:
-                    all_paths = sorted([n.path for n in self.current_nodes.values()])
-                    for p in all_paths:
-                        try:
-                            rel_path = p.relative_to(root).as_posix()
-                            out.append(f"{rel_path}")
-                        except ValueError:
-                            pass
-                else:
-                    out.append("(Project structure not yet scanned)")
-
-            elif struct_mode_index == 1:
-                # Только выбранные файлы
-                if self.selected_paths:
-                    sorted_paths = sorted([Path(p) for p in self.selected_paths])
-                    for p in sorted_paths:
-                        try:
-                            rel_path = p.relative_to(root).as_posix()
-                            out.append(f"{rel_path}")
-                        except ValueError:
-                            pass
-                else:
-                    out.append("(No files selected)")
-
-        out.append("")
-
-        # === 2. File Contents ===
-        if not self.selected_paths:
-            out.append("# No files selected for content context.")
-            return "\n".join(out)
-
-        out.append("# File Contents")
-
-        sorted_selected_paths = sorted([Path(p) for p in self.selected_paths])
-
-        # Глобальная настройка режима
-        global_mode_text = self.combo_mode.currentText()
-        global_is_skeleton = global_mode_text.startswith("Skeleton")
-
-        total_chars = 0
-        LIMIT = 10000
-
-        for p in sorted_selected_paths:
-            if limit_preview and total_chars > LIMIT:
-                out.append("\n... (preview truncated) ...")
-                break
-
-            try:
-                rel = p.relative_to(root).as_posix()
-            except ValueError:
-                rel = p.name
-
-            # === ЛОГИКА ВЫБОРА РЕЖИМА ===
-            path_str = str(p)
-            override = self.file_overrides.get(path_str)
-
-            if override == "skeleton":
-                is_file_skeleton = True
-            elif override == "full":
-                is_file_skeleton = False
-            else:
-                # Если override нет, берем глобальную настройку
-                is_file_skeleton = global_is_skeleton
-            # ============================
-
-            # Передаем вычисленный флаг is_file_skeleton
-            content = CodeProcessor.process_file(p, is_file_skeleton)
-
-            # Определяем язык для markdown разметки
-            ext = p.suffix.lower()
-            lang = "text"
-            if ext in [".py", ".pyw"]:
-                lang = "python"
-            elif ext in [".js", ".ts", ".jsx", ".tsx"]:
-                lang = "javascript"
-            elif ext in [".html", ".htm"]:
-                lang = "html"
-            elif ext in [".css"]:
-                lang = "css"
-            elif ext in [".json"]:
-                lang = "json"
-            elif ext in [".md"]:
-                lang = "markdown"
-
-            # Добавим визуальную пометку в сам контекст, чтобы LLM понимала (опционально)
-            header_suffix = " (Skeleton)" if is_file_skeleton else ""
-            out.append(f"## File: {rel}{header_suffix}")
-            out.append(f"```{lang}")
-            out.append(content)
-            out.append("```\n")
-
-            total_chars += len(content)
-
-        return "\n".join(out)
-
-    def save_current_settings(self):
-        self.settings.openai_base_url = self.inp_url.text().strip()
-        ui_key = self.inp_key.text().strip()
-        if ui_key and ui_key != "EMPTY":
-            self.settings.openai_api_key = SecretStr(ui_key)
-        self.settings.model_name = self.inp_model.text().strip()
-        self.settings.save()
-
-    def copy_context(self):
-        if not self.selected_paths:
-            self.statusBar().showMessage("No files selected!")
-            return
-        self.save_current_settings()
-        text = self.cached_full_context or self._generate_full_context(
-            limit_preview=False
+        reply = QMessageBox.question(
+            self,
+            "Apply Diffs",
+            f"Apply {len(self._diff_blocks)} change(s)?\n"
+            f"Backup (.bak) files will be created.",
         )
-        QApplication.clipboard().setText(text)
-        self.statusBar().showMessage(f"Copied {len(self.selected_paths)} files.")
-
-    # --- AGENT LOGIC ---
-    def run_agent(self):
-        if not self.selected_paths:
-            QMessageBox.warning(self, "Warning", "Select context files first.")
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
-        prompt = self.agent_prompt_input.toPlainText().strip()
-        if not prompt:
-            QMessageBox.warning(
-                self, "Warning", "Please enter instruction for the agent."
+        results = self.ctrl.apply_diffs(self._diff_blocks)
+        applied = sum(1 for b in results if b.applied)
+        errors = [b for b in results if b.error]
+
+        lines = [f"Applied {applied}/{len(results)} blocks.\n"]
+        for b in results:
+            status = "✅ Applied" if b.applied else f"❌ {b.error}"
+            lines.append(f"{b.file_path}: {status}")
+
+        self.diff_preview.setText("\n".join(lines))
+        self.preview_tabs.setCurrentWidget(self.diff_preview)
+
+        msg = f"✅ Applied {applied}/{len(results)} diffs"
+        if errors:
+            msg += f" ({len(errors)} errors)"
+        self.statusBar().showMessage(msg, 5000)
+
+        # Обновить дерево
+        if self.ctrl.project_root:
+            tree = self.ctrl.open_project(self.ctrl.project_root)
+            self.file_panel.populate_tree(tree, str(self.ctrl.project_root))
+
+        self._diff_blocks = []
+        self.task_panel.set_diff_status("", enable_apply=False)
+
+    # ─── Workflow ───
+
+    def _start_workflow(self, key: str):
+        step = self.ctrl.start_workflow(key)
+        wf = self.ctrl.workflow_engine.active_workflow
+
+        self.workflow_panel.set_workflow_active(True)
+        if wf:
+            self.workflow_panel.update_steps(wf.steps)
+
+        if step:
+            self.builder_panel.apply_step_suggestions(
+                role=step.role.value,
+                skills=step.suggested_skills,
+                rules=step.suggested_rules,
+                output_format=step.suggested_output_format,
             )
-            return
+            self.file_panel.combo_mode.setCurrentText(step.context_mode)
+            self.right_tabs.setCurrentWidget(self.builder_panel)
 
-        self.save_current_settings()
-
-        # Контекст генерируется на основе текущих настроек (скелет/полный)
-        context = (
-            self.cached_full_context
-            if self.cached_full_context
-            else self._generate_full_context()
+        self.statusBar().showMessage(
+            f"Workflow started: {key}. Step 1: {step.name if step else '?'}",
+            5000,
         )
+        self._update_assembled()
 
-        self.agent_log_output.clear()
-        self.agent_log_output.append(">>> Starting Agent...")
-        self.btn_run_agent.setEnabled(False)
+    def _stop_workflow(self):
+        self.ctrl.stop_workflow()
+        self.workflow_panel.set_workflow_active(False)
+        self.workflow_panel.clear_steps()
+        self.statusBar().showMessage("Workflow stopped.", 3000)
 
-        # Инициализация воркера с текущими настройками
-        self.agent_worker = AgentWorker(
-            settings=self.settings,
-            project_root=Path(self.settings.last_project_path),
-            context=context,
-            user_prompt=prompt,
-            use_reasoning=self.cb_reasoning.isChecked(),
-        )
+    def _advance_workflow(self, result_text: str):
+        next_step = self.ctrl.advance_workflow(result_text)
+        wf = self.ctrl.workflow_engine.active_workflow
 
-        # Подключение стандартных сигналов (логи, результат, ошибки, завершение)
-        self.agent_worker.log_signal.connect(self.on_agent_log)
-        self.agent_worker.result_signal.connect(self.on_agent_result)
-        self.agent_worker.error_signal.connect(self.on_agent_error)
-        self.agent_worker.finished.connect(lambda: self.btn_run_agent.setEnabled(True))
+        if wf:
+            self.workflow_panel.update_steps(wf.steps)
 
-        # --- НОВОЕ: Подключение сигналов Human-in-the-Loop ---
-
-        # 1. Запрос на создание файла (path, content)
-        self.agent_worker.request_creation_signal.connect(
-            self.on_agent_creation_request
-        )
-
-        # 2. Запрос на изменение файла (path, original_snippet, new_snippet)
-        self.agent_worker.request_edit_signal.connect(self.on_agent_edit_request)
-
-        self.agent_worker.start()
-
-    def on_agent_creation_request(self, rel_path, content):
-        """Обработка запроса на СОЗДАНИЕ файла."""
-        dialog = FileCreationDialog(rel_path, content, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.agent_worker.set_user_response(True)
+        if next_step:
+            self.builder_panel.apply_step_suggestions(
+                role=next_step.role.value,
+                skills=next_step.suggested_skills,
+                rules=next_step.suggested_rules,
+                output_format=next_step.suggested_output_format,
+            )
+            self.file_panel.combo_mode.setCurrentText(next_step.context_mode)
+            self.right_tabs.setCurrentWidget(self.builder_panel)
+            self.statusBar().showMessage(f"Step {next_step.id}: {next_step.name}", 5000)
         else:
-            self.agent_worker.set_user_response(False)
+            self._stop_workflow()
+            QMessageBox.information(self, "Done", "Workflow completed! 🎉")
 
-    def on_agent_edit_request(self, rel_path, original, new_code):
-        """Обработка запроса на РЕДАКТИРОВАНИЕ файла."""
-        dialog = FileEditDialog(rel_path, original, new_code, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.agent_worker.set_user_response(True)
+        self._update_assembled()
+
+    def _skip_workflow(self):
+        next_step = self.ctrl.skip_workflow_step()
+        wf = self.ctrl.workflow_engine.active_workflow
+
+        if wf:
+            self.workflow_panel.update_steps(wf.steps)
+
+        if next_step:
+            self.builder_panel.apply_step_suggestions(
+                role=next_step.role.value,
+                skills=next_step.suggested_skills,
+                rules=next_step.suggested_rules,
+                output_format=next_step.suggested_output_format,
+            )
         else:
-            self.agent_worker.set_user_response(False)
+            self._stop_workflow()
 
-    def on_agent_log(self, msg):
-        self.agent_log_output.append(msg)
-        # Прокрутка вниз
-        sb = self.agent_log_output.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self._update_assembled()
 
-    def on_agent_result(self, result):
-        self.agent_log_output.append(f"\n>>> AGENT FINISHED:\n{result}")
-        # Автоматическое обновление дерева, если файлы были созданы
-        self.refresh_tree()
+    def _save_step_result(self, text: str):
+        """Сохранить ответ модели в поле результата воркфлоу."""
+        if text:
+            self.workflow_panel.set_result_text(text[:3000])
+            self.statusBar().showMessage("Response saved as step result", 3000)
 
-    def on_agent_error(self, err):
-        self.agent_log_output.append(f"\n>>> ERROR: {err}")
-        QMessageBox.critical(self, "Agent Error", err)
+    def _save_workspace(self, name: str):
+        try:
+            self.ctrl.workflow_engine.save_workspace(name)
+            self.statusBar().showMessage(f"Session saved: {name}", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
 
-    def on_agent_approval_request(self, rel_path, content):
-        """Обработка сигнала Human-in-Loop из воркера."""
-        dlg = FileCreationDialog(rel_path, content, self)
-        res = dlg.exec()
-        approved = res == QDialog.DialogCode.Accepted
-
-        if self.agent_worker:
-            self.agent_worker.set_user_response(approved)
-
-    def show_tree_context_menu(self, position):
-        item = self.tree.itemAt(position)
-        if not item:
-            return
-
-        path_str = item.data(0, Qt.ItemDataRole.UserRole)
-        if not path_str:
-            return  # Это папка без пути или корень, пропускаем
-
-        # Создаем меню
-        menu = QMenu()
-
-        # Действия
-        action_default = menu.addAction("Use Global Default")
-        action_full = menu.addAction("Force FULL Content")
-        action_skel = menu.addAction("Force SKELETON")
-
-        # Отмечаем текущее состояние галочкой в меню (опционально, для красоты)
-        current_override = self.file_overrides.get(path_str)
-        if current_override == "full":
-            action_full.setCheckable(True)
-            action_full.setChecked(True)
-        elif current_override == "skeleton":
-            action_skel.setCheckable(True)
-            action_skel.setChecked(True)
+    def _load_workspace(self, name: str):
+        wf = self.ctrl.workflow_engine.load_workspace(name)
+        if wf:
+            self.workflow_panel.set_workflow_active(True)
+            self.workflow_panel.update_steps(wf.steps)
+            self.statusBar().showMessage(f"Session loaded: {name}", 3000)
         else:
-            action_default.setCheckable(True)
-            action_default.setChecked(True)
+            QMessageBox.warning(self, "Not Found", f"Session '{name}' not found.")
 
-        # Запуск меню и обработка выбора
-        action = menu.exec(self.tree.viewport().mapToGlobal(position))
+    # ─── Templates ───
 
-        if action == action_default:
-            self.set_file_override(item, None)
-        elif action == action_full:
-            self.set_file_override(item, "full")
-        elif action == action_skel:
-            self.set_file_override(item, "skeleton")
+    def _open_template_editor(self):
+        from src.ui.dialogs.template_editor_dialog import TemplateEditorDialog
 
-    def set_file_override(self, item: QTreeWidgetItem, mode: str):
-        path_str = item.data(0, Qt.ItemDataRole.UserRole)
-        if not path_str:
-            return
+        dlg = TemplateEditorDialog(self.ctrl.template_manager, self)
+        dlg.exec()
+        self._reload_templates()
 
-        if mode is None:
-            # Удаляем из словаря
-            self.file_overrides.pop(path_str, None)
-        else:
-            self.file_overrides[path_str] = mode
+    def _reload_templates(self):
+        self.builder_panel.reload_templates()
+        self.statusBar().showMessage("Templates reloaded", 3000)
 
-        # Обновляем визуальное отображение (текст в дереве)
-        self.update_item_label(item, path_str)
+    # ─── Window ───
 
-        # Обновляем превью, так как контекст изменился
-        self.update_preview_content()
-
-    def update_item_label(self, item: QTreeWidgetItem, path_str: str):
-        """Обновляет текст элемента дерева, добавляя маркер режима."""
-        # Получаем чистое имя файла (восстанавливаем из пути, чтобы убрать старые метки)
-        clean_name = Path(path_str).name
-
-        override = self.file_overrides.get(path_str)
-
-        if override == "skeleton":
-            item.setText(0, f"{clean_name} [SKEL]")
-            # Проверяем тему для установки цвета
-            if self.settings.dark_mode:
-                item.setForeground(
-                    0, QColor("#e6db74")
-                )  # Светло-желтый для темной темы
-            else:
-                item.setForeground(
-                    0, QColor("#b58900")
-                )  # Оливковый/Темно-желтый для светлой
-        elif override == "full":
-            item.setText(0, f"{clean_name} [FULL]")
-            if self.settings.dark_mode:
-                item.setForeground(
-                    0, QColor("#a6e22e")
-                )  # Светло-зеленый для темной темы
-            else:
-                item.setForeground(0, QColor("#008000"))  # Темно-зеленый для светлой
-        else:
-            item.setText(0, clean_name)
-            # Возвращаем стандартный цвет
-            if self.settings.dark_mode:
-                item.setForeground(0, QColor("#f0f0f0"))
-            else:
-                item.setForeground(0, QColor("#000000"))
+    def closeEvent(self, event):
+        self.ctrl.save_app_settings()
+        super().closeEvent(event)
