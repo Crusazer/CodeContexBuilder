@@ -39,6 +39,7 @@ from src.config import settings
 from src.ui.workers import ScanWorker, AgentWorker
 from src.core.processor_logic import CodeProcessor
 from src.core.token_counter import TokenCounter
+from src.core.git_service import GitService
 
 
 class FileEditDialog(QDialog):
@@ -307,6 +308,11 @@ class MainWindow(QMainWindow):
         btn_reset.clicked.connect(self.reset_selection)
         buttons_layout.addWidget(btn_reset)
 
+        # [NEW] Кнопка загрузки изменённых файлов
+        btn_changed = QPushButton("Load Changed Files")
+        btn_changed.clicked.connect(self.load_changed_files)
+        buttons_layout.addWidget(btn_changed)
+
         l_layout.addLayout(buttons_layout)
 
         self.cb_ignore = QCheckBox("Hide .gitignore files")
@@ -484,6 +490,79 @@ class MainWindow(QMainWindow):
         self.selected_paths.clear()
         self.update_preview_content()
         self.statusBar().showMessage("Selection cleared.", 2000)
+
+    def load_changed_files(self):
+        """Загружает файлы, изменённые с последнего коммита, и выбирает их."""
+        if not self.settings.last_project_path:
+            QMessageBox.warning(self, "Warning", "Open a project folder first.")
+            return
+
+        repo_path = Path(self.settings.last_project_path)
+        git_service = GitService(repo_path)
+
+        try:
+            changed_files = git_service.get_changed_files()
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Git Error", f"Failed to get changed files:\n{e}"
+            )
+            return
+
+        if not changed_files:
+            QMessageBox.information(
+                self, "No Changes", "No files changed since last commit."
+            )
+            return
+
+        # Снимаем текущее выделение
+        self.reset_selection()
+
+        # Выбираем изменённые файлы в дереве
+        self.tree.blockSignals(True)
+        selected_count = 0
+        not_found_count = 0
+
+        for file_path in changed_files:
+            path_str = str(file_path)
+            # Находим элемент в дереве по пути
+            item_found = False
+            iterator = QTreeWidgetItemIterator(self.tree)
+            while iterator.value():
+                item = iterator.value()
+                item_path = item.data(0, Qt.ItemDataRole.UserRole)
+                if item_path == path_str:
+                    item.setCheckState(0, Qt.CheckState.Checked)
+                    # Разворачиваем родительские элементы для видимости
+                    parent = item.parent()
+                    while parent:
+                        parent.setExpanded(True)
+                        parent = parent.parent()
+                    item_found = True
+                    # Добавляем в selected_paths
+                    self.selected_paths.add(path_str)
+                    selected_count += 1
+                    break
+                iterator += 1
+            
+            if not item_found:
+                not_found_count += 1
+
+        self.tree.blockSignals(False)
+
+        # Обновляем превью
+        self.update_preview_content()
+
+        # Показываем сообщение с деталями
+        msg = f"✓ Selected {selected_count} changed file(s)"
+        if not_found_count > 0:
+            msg += f" ({not_found_count} not in tree)"
+        self.statusBar().showMessage(msg, 5000)
+        
+        # Переключаем на режим контекста для удобного просмотра
+        self.rb_context_view.setChecked(True)
+        
+        # Явно обновляем превью после переключения
+        self.update_preview_content()
 
     # ... (open_dir_dialog, load_project, refresh_tree, on_scan_done, on_processing_mode_changed - без изменений)
     def open_dir_dialog(self):
