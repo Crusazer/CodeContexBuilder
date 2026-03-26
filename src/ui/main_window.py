@@ -198,7 +198,21 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Prompt Workshop — {Path(path).name}")
         self.statusBar().showMessage(f"Opened: {path}", 3000)
 
+        # Автоматически подсветить изменённые файлы (git diff)
+        self._highlight_changed_files()
+
     # ─── File Selection ───
+
+    def _highlight_changed_files(self):
+        """Подсветить изменённые файлы в дереве (без выделения чекбоксами)."""
+        if not self.ctrl.project_root:
+            return
+
+        paths, error = self.ctrl.select_changed_files()
+        if error or not paths:
+            return
+
+        self.file_panel.highlight_paths(paths)
 
     def _select_changed_files(self):
         """Обработчик выбора изменённых файлов."""
@@ -373,10 +387,11 @@ class MainWindow(QMainWindow):
             msg += f" ({len(errors)} errors)"
         self.statusBar().showMessage(msg, 5000)
 
-        # Обновить дерево
+        # Обновить дерево и подсветку
         if self.ctrl.project_root:
             tree = self.ctrl.open_project(self.ctrl.project_root)
             self.file_panel.populate_tree(tree, str(self.ctrl.project_root))
+            self._highlight_changed_files()
 
         self._diff_blocks = []
         self.task_panel.set_diff_status("", enable_apply=False)
