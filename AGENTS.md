@@ -181,6 +181,19 @@ new replacement code
 >>>>>>> REPLACE
 ```
 
+Допускается обёртка в markdown code fences (3+ бэктика с опциональным указанием языка):
+
+````markdown
+## File: path/to/file.py
+```python
+<<<<<<< SEARCH
+exact original code including whitespace
+=======
+new replacement code
+>>>>>>> REPLACE
+```
+````
+
 Правила:
 1. `SEARCH` должен встречаться в файле **ровно 1 раз**, иначе ошибка «ambiguous»
 2. Пустой `SEARCH` → создание нового файла (`is_new_file=True`)
@@ -291,7 +304,7 @@ project_root/
 → Править `BUILTIN_WORKFLOWS` в `src/models/workflow_schemas.py`. Не трогать `workflow_engine.py`.
 
 ### «Починить парсинг диффов»
-→ `src/core/diff_engine.py`, метод `parse()`. Регекс `PATTERN` — источник истины.
+→ `src/core/diff_engine.py`, метод `parse()`. Построчный state-machine парсер с отслеживанием глубины вложенности маркеров.
 
 ### «Добавить skeleton для TypeScript»
 → `src/core/parser_logic.py`, `_make_skeleton()`. Сейчас работает только для `.py`. Добавить ветку для `.ts`/`.tsx`.
@@ -313,7 +326,7 @@ project_root/
 - ❌ Не убирать `.bak` бэкапы в `DiffEngine.apply_all()`
 - ❌ Не хардкодить пути — использовать `config.TEMPLATES_DIR`, `config.WORKSPACES_DIR`
 - ❌ Не вызывать OpenAI напрямую из UI — только через `AIService` / `AgentService`
-- ❌ Не менять формат SEARCH/REPLACE без обновления `DiffEngine.PATTERN`
+- ❌ Не менять формат SEARCH/REPLACE без обновления парсера в `DiffEngine.parse()`
 - ❌ Не добавлять `python-frontmatter` как обязательную зависимость — есть ручной fallback
 - ❌ Не блокировать UI-поток AI-вызовами — использовать `AgentWorker` / `AIWorker` (QThread)
 - ❌ Не вызывать core-сервисы из UI напрямую — всегда через `AppController`
@@ -326,7 +339,7 @@ project_root/
 |-----|-----|-----|
 | Новый шаблон | `templates/{category}/*.md` | Создать файл, перезагрузить |
 | Новый воркфлоу | `workflow_schemas.py` → `BUILTIN_WORKFLOWS` | Добавить `Workflow` |
-| Новый формат диффов | `diff_engine.py` → `PATTERN`, `parse()` | Расширить регекс |
+| Новый формат диффов | `diff_engine.py` → `parse()` | Расширить state-machine парсер |
 | Новый AI-провайдер | `ai_service.py` → наследование `AIService` | Переопределить методы |
 | Новая панель UI | `ui/panels/` | Создать виджет, подключить сигналы в `MainWindow._connect_signals()` |
 | Новый tool агента | `ai_service.py` → `TOOL_*` + `run_agent_loop()` | Добавить словарь + ветку обработки |

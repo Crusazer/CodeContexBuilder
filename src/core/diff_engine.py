@@ -47,45 +47,85 @@ class DiffParseResult:
 class DiffEngine:
     """Парсинг и применение диффов."""
 
-    # Основной паттерн: SEARCH/REPLACE
-    # Поддерживает опциональные markdown code fences (``` ... ```) вокруг блоков
-    PATTERN = re.compile(
-        r"## File:\s*`?([^`\n]+?)`?\s*\n"
-        r"(?:`{3,}[^\n]*\n)?"  # опциональный открывающий fence (```lang)
-        r"<<<<<<< SEARCH\n"
-        r"(.*?)"
-        r"=======\n"
-        r"(.*?)"
-        r">>>>>>> REPLACE"
-        r"(?:\n`{3,}[^\n]*)?",  # опциональный закрывающий fence
-        re.DOTALL,
-    )
+    # Паттерны для построчного парсинга
+    _FILE_HEADER = re.compile(r"^## File:\s*`?([^`\n]+?)`?\s*$")
+    _FENCE = re.compile(r"^`{3,}")
 
     @classmethod
     def parse(cls, text: str) -> DiffParseResult:
-        """Парсит ответ модели, извлекая SEARCH/REPLACE блоки."""
+        """Парсит ответ модели, извлекая SEARCH/REPLACE блоки.
+
+        Использует построчный state-machine парсер с отслеживанием глубины
+        вложенности маркеров, что позволяет корректно обрабатывать
+        диффы, содержащие примеры формата внутри себя.
+        """
         result = DiffParseResult()
+        lines = text.split("\n")
+        i = 0
 
-        for match in cls.PATTERN.finditer(text):
-            file_path = match.group(1).strip()
-            search = match.group(2)
-            replace = match.group(3)
+        state = "IDLE"  # IDLE → EXPECT_SEARCH → IN_SEARCH → IN_REPLACE
+        file_path = ""
+        search_lines: list[str] = []
+        replace_lines: list[str] = []
+        depth = 0
 
-            # Убираем ровно один trailing \n если есть (артефакт формата)
-            if search.endswith("\n"):
-                search = search[:-1]
-            if replace.endswith("\n"):
-                replace = replace[:-1]
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
 
-            is_new = search.strip() == ""
+            if state == "IDLE":
+                m = cls._FILE_HEADER.match(line)
+                if m:
+                    file_path = m.group(1).strip()
+                    state = "EXPECT_SEARCH"
 
-            block = DiffBlock(
-                file_path=file_path,
-                search=search,
-                replace=replace,
-                is_new_file=is_new,
-            )
-            result.blocks.append(block)
+            elif state == "EXPECT_SEARCH":
+                # Пропускаем опциональный открывающий code fence
+                if cls._FENCE.match(line):
+                    i += 1
+                    continue
+                if stripped == "<<<<<<< SEARCH":
+                    state = "IN_SEARCH"
+                    search_lines = []
+                    depth = 1
+                else:
+                    m = cls._FILE_HEADER.match(line)
+                    if m:
+                        file_path = m.group(1).strip()
+                        # state остаётся EXPECT_SEARCH
+
+            elif state == "IN_SEARCH":
+                if stripped == "<<<<<<< SEARCH":
+                    depth += 1
+                    search_lines.append(line)
+                elif stripped == "=======" and depth == 1:
+                    state = "IN_REPLACE"
+                    replace_lines = []
+                elif stripped == ">>>>>>> REPLACE":
+                    depth -= 1
+                    if depth == 0:
+                        cls._add_block(result, file_path, search_lines, replace_lines)
+                        state = "IDLE"
+                    else:
+                        search_lines.append(line)
+                else:
+                    search_lines.append(line)
+
+            elif state == "IN_REPLACE":
+                if stripped == "<<<<<<< SEARCH":
+                    depth += 1
+                    replace_lines.append(line)
+                elif stripped == ">>>>>>> REPLACE":
+                    depth -= 1
+                    if depth == 0:
+                        cls._add_block(result, file_path, search_lines, replace_lines)
+                        state = "IDLE"
+                    else:
+                        replace_lines.append(line)
+                else:
+                    replace_lines.append(line)
+
+            i += 1
 
         if not result.blocks:
             result.unparsed_text = text
@@ -95,6 +135,34 @@ class DiffEngine:
             )
 
         return result
+
+    @classmethod
+    def _add_block(
+        cls,
+        result: DiffParseResult,
+        file_path: str,
+        search_lines: list[str],
+        replace_lines: list[str],
+    ) -> None:
+        """Создать и добавить DiffBlock в результат."""
+        search = "\n".join(search_lines)
+        replace = "\n".join(replace_lines)
+
+        # Убираем ровно один trailing \n если есть (артефакт формата)
+        if search.endswith("\n"):
+            search = search[:-1]
+        if replace.endswith("\n"):
+            replace = replace[:-1]
+
+        is_new = search.strip() == ""
+
+        block = DiffBlock(
+            file_path=file_path,
+            search=search,
+            replace=replace,
+            is_new_file=is_new,
+        )
+        result.blocks.append(block)
 
     @classmethod
     def apply_block(cls, block: DiffBlock, project_root: Path) -> DiffBlock:
