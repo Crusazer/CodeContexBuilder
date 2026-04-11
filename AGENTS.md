@@ -190,10 +190,11 @@ new replacement code
 
 ### Воркфлоу (`WorkflowEngine`)
 
-3 встроенных сценария (`BUILTIN_WORKFLOWS`):
-- **`new-feature`** (4 шага): Orchestrator → Architect → Worker ��� Reviewer
+4 встроенных сценария (`BUILTIN_WORKFLOWS`):
+- **`new-feature`** (4 шага): Orchestrator → Architect → Worker → Reviewer
 - **`bug-fix`** (1 шаг): Debugger
 - **`refactor`** (2 шага): Architect → Worker
+- **`interactive-change`** (2 шага): Interactive Developer (анализ + запрос файлов) → Interactive Developer (реализация диффов)
 
 Каждый шаг (`WorkflowStep`) задаёт: роль, скиллы, правила, формат, `context_mode`. При `advance_step(result_text)` результат подставляется в секцию `INSTRUCTIONS FROM PREVIOUS STEP`. Воркспейсы персистятся в `workspaces/*.json`.
 

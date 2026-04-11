@@ -1,12 +1,10 @@
 """Prompt Workshop — модульный конструктор промптов для LLM-кодинга."""
 
 import sys
-from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QFont
 
-from src.config import ROOT_DIR, ensure_dirs
+from src.config import ensure_dirs
 from src.ui.main_window import MainWindow
 from src.ui.styles import get_dark_theme_qss
 
@@ -20,7 +18,6 @@ def main():
 
     # Тёмная тема
     from PyQt6.QtGui import QPalette, QColor
-    from PyQt6.QtCore import Qt
 
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))

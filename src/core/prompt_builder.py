@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from src.core.template_manager import TemplateManager
 from src.core.token_counter import TokenCounter
-from src.models.prompt_schemas import PromptAssembly, TemplateCategory
+from src.models.prompt_schemas import PromptAssembly
 
 
 class PromptBuilder:

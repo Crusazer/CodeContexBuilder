@@ -21,6 +21,7 @@ class StepRole(str, Enum):
     WORKER = "worker"
     REVIEWER = "reviewer"
     DEBUGGER = "debugger"
+    INTERACTIVE_DEVELOPER = "interactive-developer"
 
 
 class WorkflowStep(BaseModel):
@@ -150,8 +151,36 @@ _WORKFLOW_REFACTOR = Workflow(
     ],
 )
 
+_WORKFLOW_INTERACTIVE_CHANGE = Workflow(
+    name="Interactive Change",
+    description="Анализ метаданных → запрос файлов → реализация диффов",
+    steps=[
+        WorkflowStep(
+            id=1,
+            name="Анализ и запрос файлов",
+            role=StepRole.INTERACTIVE_DEVELOPER,
+            description="Изучить AGENTS.md/DEPS.md, определить релевантные файлы, запросить их через TOOL-протокол.",
+            suggested_skills=["manual-tools", "project-context-reader"],
+            suggested_rules=["iterative-workflow"],
+            suggested_output_format="interactive-response",
+            context_mode="full",
+        ),
+        WorkflowStep(
+            id=2,
+            name="Реализация изменений",
+            role=StepRole.INTERACTIVE_DEVELOPER,
+            description="Получив запрошенные файлы, реализовать изменения через SEARCH/REPLACE диффы.",
+            suggested_skills=["project-context-reader"],
+            suggested_rules=["iterative-workflow"],
+            suggested_output_format="search-replace-blocks",
+            context_mode="full",
+        ),
+    ],
+)
+
 BUILTIN_WORKFLOWS: dict[str, Workflow] = {
     "new-feature": _WORKFLOW_NEW_FEATURE,
     "bug-fix": _WORKFLOW_BUG_FIX,
     "refactor": _WORKFLOW_REFACTOR,
+    "interactive-change": _WORKFLOW_INTERACTIVE_CHANGE,
 }

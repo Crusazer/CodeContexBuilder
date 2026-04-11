@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 
-from src.core.fs_scanner import FileNode, FsScanner
+from src.core.fs_scanner import FileNode
 from src.ui.styles import get_file_tree_qss
 
 

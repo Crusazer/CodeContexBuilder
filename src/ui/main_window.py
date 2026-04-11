@@ -11,11 +11,10 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QApplication,
     QStatusBar,
-    QMenuBar,
     QMessageBox,
     QFileDialog,
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QAction, QKeySequence
 
 from src.controller import AppController
