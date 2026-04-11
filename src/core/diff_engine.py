@@ -48,13 +48,16 @@ class DiffEngine:
     """Парсинг и применение диффов."""
 
     # Основной паттерн: SEARCH/REPLACE
+    # Поддерживает опциональные markdown code fences (``` ... ```) вокруг блоков
     PATTERN = re.compile(
         r"## File:\s*`?([^`\n]+?)`?\s*\n"
+        r"(?:`{3,}[^\n]*\n)?"  # опциональный открывающий fence (```lang)
         r"<<<<<<< SEARCH\n"
         r"(.*?)"
         r"=======\n"
         r"(.*?)"
-        r">>>>>>> REPLACE",
+        r">>>>>>> REPLACE"
+        r"(?:\n`{3,}[^\n]*)?",  # опциональный закрывающий fence
         re.DOTALL,
     )
 
