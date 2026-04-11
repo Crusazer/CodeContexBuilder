@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QGroupBox,
+    QCheckBox,
 )
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
@@ -23,6 +24,7 @@ class TaskPanel(QWidget):
     parse_diffs_requested = pyqtSignal(str)  # response text
     apply_diffs_requested = pyqtSignal()
     save_step_result_requested = pyqtSignal(str)  # response text
+    backup_toggled = pyqtSignal(bool)  # backup enabled changed
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -113,6 +115,16 @@ class TaskPanel(QWidget):
         resp_btns.addWidget(self.btn_save_step)
         rl.addLayout(resp_btns)
 
+        # Чекбокс бэкапов
+        self.chk_backup = QCheckBox("Create .bak backups before applying")
+        self.chk_backup.setChecked(True)
+        self.chk_backup.setToolTip(
+            "Если включено, перед изменением файлов создаются .bak копии.\n"
+            "Если вы используете git — можно отключить."
+        )
+        self.chk_backup.toggled.connect(self.backup_toggled)
+        rl.addWidget(self.chk_backup)
+
         self.lbl_diff_status = QLabel("")
         rl.addWidget(self.lbl_diff_status)
 
@@ -142,3 +154,9 @@ class TaskPanel(QWidget):
         self.response_input.clear()
         self.lbl_diff_status.setText("")
         self.btn_apply.setEnabled(False)
+
+    def is_backup_enabled(self) -> bool:
+        return self.chk_backup.isChecked()
+
+    def set_backup_enabled(self, enabled: bool):
+        self.chk_backup.setChecked(enabled)

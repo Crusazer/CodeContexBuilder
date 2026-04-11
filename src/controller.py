@@ -210,10 +210,11 @@ class AppController:
         return DiffEngine.dry_run(blocks, self._project_root)
 
     def apply_diffs(self, blocks: list[DiffBlock]) -> list[DiffBlock]:
-        """Применить блоки с бэкапом."""
+        """Применить блоки. Бэкап зависит от настройки backup_enabled."""
         if not self._project_root:
             return []
-        return DiffEngine.apply_all(blocks, self._project_root, backup=True)
+        backup = self.settings.get("backup_enabled", True)
+        return DiffEngine.apply_all(blocks, self._project_root, backup=backup)
 
     # ─── Settings ───
 

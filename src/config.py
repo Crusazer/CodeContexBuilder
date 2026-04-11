@@ -36,6 +36,7 @@ def load_settings() -> dict[str, Any]:
         "token_warning_threshold": 100000,
         "window_geometry": None,
         "recent_projects": [],
+        "backup_enabled": True,
     }
 
 

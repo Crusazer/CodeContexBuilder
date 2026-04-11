@@ -80,7 +80,8 @@ src/
 6. Parse & Apply Diffs
    TaskPanel.parse_diffs_requested → DiffEngine.parse() → DiffBlock[]
    → DiffEngine.dry_run() → preview в Diff Preview tab
-   → DiffEngine.apply_all() → .bak-бэкапы → запись файлов → refresh дерева
+   → DiffEngine.apply_all(backup=backup_enabled) → .bak-бэкапы (если включено) → запись файлов → refresh дерева
+   TaskPanel.backup_toggled → controller.settings["backup_enabled"] → save_settings()
 
 7. Agent Mode (опционально)
    AgentWorker → AgentService.run_agent_loop()
@@ -268,6 +269,7 @@ project_root/
 - **`PromptAssembly.assembled_prompt`** — property, пересчитывается при каждом обращении. Не кешируется. Не вызывай в цикле без необходимости.
 - **`controller._sync_builder_from_panel()`** — мутирует `_assembly.skills` / `_assembly.rules` через `.clear()` напрямую, обходя API `PromptBuilder`. Если вызвать `add_skill()` до `_sync_builder_from_panel()`, результат затрётся.
 - **`DiffEngine.apply_block`** — при нормализации whitespace использует подсчёт строк, что может дать неточный результат при смешанных пробелах/табах.
+- **`DiffEngine.apply_all(backup=...)`** — создание `.bak`-файлов управляется настройкой `backup_enabled` из `settings.json`. Чекбокс в `TaskPanel` переключает её мгновенно (с сохранением). При `backup=False` файлы перезаписываются без бэкапов — полагайтесь на git.
 - **`AgentWorker`** — блокирует воркер-поток через `QWaitCondition.wait()`. UI-поток не блокируется, но воркер ждёт ответа пользователя бесконечно.
 - **`GitService`** — вызывает `git` через `subprocess`, требует git в PATH. Таймаут — 10 сек. Не работает без git.
 - **`FsScanner`** — игнорирует директории по glob-паттернам (`DEFAULT_IGNORE`), НЕ читает `.gitignore`. `pathspec` в зависимостях, но не используется в сканере.

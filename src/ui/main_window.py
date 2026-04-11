@@ -41,6 +41,10 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._init_shortcuts()
 
+        # Восстановить состояние чекбокса бэкапов из настроек
+        backup_enabled = self.ctrl.settings.get("backup_enabled", True)
+        self.task_panel.set_backup_enabled(backup_enabled)
+
         # Открыть последний проект
         last = self.ctrl.settings.get("last_project_path", "")
         if last and Path(last).is_dir():
@@ -176,6 +180,7 @@ class MainWindow(QMainWindow):
         self.task_panel.parse_diffs_requested.connect(self._parse_diffs)
         self.task_panel.apply_diffs_requested.connect(self._apply_diffs)
         self.task_panel.save_step_result_requested.connect(self._save_step_result)
+        self.task_panel.backup_toggled.connect(self._on_backup_toggled)
 
         # Workflow panel
         self.workflow_panel.workflow_start_requested.connect(self._start_workflow)
@@ -361,11 +366,17 @@ class MainWindow(QMainWindow):
         if not self._diff_blocks or not self.ctrl.project_root:
             return
 
+        backup = self.ctrl.settings.get("backup_enabled", True)
+        backup_note = (
+            "Backup (.bak) files will be created."
+            if backup
+            else "Backup is disabled. Changes will be applied directly."
+        )
+
         reply = QMessageBox.question(
             self,
             "Apply Diffs",
-            f"Apply {len(self._diff_blocks)} change(s)?\n"
-            f"Backup (.bak) files will be created.",
+            f"Apply {len(self._diff_blocks)} change(s)?\n{backup_note}",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -395,6 +406,15 @@ class MainWindow(QMainWindow):
 
         self._diff_blocks = []
         self.task_panel.set_diff_status("", enable_apply=False)
+
+    # ─── Backup toggle ───
+
+    def _on_backup_toggled(self, enabled: bool):
+        """Сохранить настройку бэкапов при изменении чекбокса."""
+        self.ctrl.settings["backup_enabled"] = enabled
+        self.ctrl.save_app_settings()
+        state = "enabled" if enabled else "disabled"
+        self.statusBar().showMessage(f".bak backups {state}", 3000)
 
     # ─── Workflow ───
 
